@@ -1,0 +1,12 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+
+chroma_db/
+chroma db/
+uploads/
+outputs/
+
+.DS_Store
+Thumbs.db
