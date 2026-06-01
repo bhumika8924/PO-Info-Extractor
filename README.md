@@ -83,3 +83,51 @@ http://localhost:8501
 ## Later Ollama Hook
 
 The current app intentionally avoids LLM calls. If you later want to add Ollama, the best place is after retrieval in `app.py`: send `retrieved_contexts` to a local Ollama prompt and compare/merge its JSON response with the rule-based result from `utils/extractor.py`.
+
+## MySQL Setup
+
+The app automatically saves extracted PO headers and line items into MySQL after processing PDFs.
+
+Default MySQL settings are defined in `utils/database.py`:
+
+```text
+host = localhost
+user = root
+password = @bhumi1234
+database = po_extractor
+```
+
+Create the database manually if you want to verify setup before running the app:
+
+```powershell
+mysql -u root -p
+```
+
+Then run:
+
+```sql
+CREATE DATABASE IF NOT EXISTS po_extractor;
+USE po_extractor;
+```
+
+The app also creates the database and tables automatically when PDFs are processed.
+
+To change the password, edit `MYSQL_CONFIG` in:
+
+```text
+utils/database.py
+```
+
+After processing PDFs, verify saved data:
+
+```sql
+USE po_extractor;
+SELECT * FROM po_headers;
+SELECT * FROM po_items;
+```
+
+If MySQL is not running or credentials are wrong, CSV and JSON exports still work. The app will show:
+
+```text
+MySQL connection failed. Please check MySQL service, username, password, and database.
+```

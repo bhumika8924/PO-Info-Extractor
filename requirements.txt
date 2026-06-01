@@ -4,3 +4,4 @@ chromadb==0.5.3
 sentence-transformers==3.0.1
 pandas==2.2.2
 torch>=2.2.0
+mysql-connector-python==9.0.0

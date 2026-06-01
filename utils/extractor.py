@@ -1,5 +1,10 @@
 import re
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+import pdfplumber
 
 
 GST_PATTERN = re.compile(r"\b\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]\b", re.IGNORECASE)
@@ -135,6 +140,59 @@ class GstOccurrence:
     vendor_score: int
 
 
+HEADER_COLUMNS = [
+    "file_name",
+    "po_number",
+    "po_date",
+    "buyer_name",
+    "billing_address",
+    "billing_gst_number",
+    "vendor_name",
+    "vendor_gst_number",
+    "total_amount",
+    "extraction_status",
+    "warnings",
+]
+
+ITEM_COLUMNS = [
+    "file_name",
+    "po_number",
+    "item_no",
+    "item_name",
+    "item_description",
+    "hsn_sac",
+    "quantity",
+    "uom",
+    "unit_price",
+    "tax_percent",
+    "line_total",
+]
+
+ITEM_HEADER_KEYWORDS = [
+    "item",
+    "item no",
+    "sr",
+    "sr no",
+    "no",
+    "description",
+    "item desc",
+    "qty",
+    "quantity",
+    "uom",
+    "unit",
+    "unit type",
+    "rate",
+    "unit price",
+    "amount",
+    "total amount",
+    "hsn",
+    "sac",
+    "cgst",
+    "sgst",
+    "igst",
+]
+
+
 def normalize_lines(text: str) -> list[str]:
     """Return clean non-empty lines from PDF text."""
     lines = []
@@ -143,6 +201,138 @@ def normalize_lines(text: str) -> list[str]:
         if line:
             lines.append(line)
     return lines
+
+
+def clean_cell(value: Any) -> str:
+    """Normalize a PDF table cell into a clean string."""
+    if value is None:
+        return ""
+    return re.sub(r"\s+", " ", str(value).replace("\n", " ")).strip()
+
+
+def normalize_amount(value: str | None) -> str | None:
+    """Keep money-like values comparable for CSV/database export."""
+    if not value:
+        return None
+    match = re.search(r"-?\d[\d,]*(?:\.\d+)?", str(value))
+    return match.group(0).replace(",", "") if match else None
+
+
+def normalize_percent(value: str | None) -> str | None:
+    """Extract a numeric tax percent from text such as CGST/SGST/IGST columns."""
+    if not value:
+        return None
+    numbers = re.findall(r"\d+(?:\.\d+)?", str(value))
+    if not numbers:
+        return None
+    non_zero = [number for number in numbers if float(number) > 0]
+    return non_zero[-1] if non_zero else numbers[-1]
+
+
+def extract_po_number(text: str) -> str | None:
+    """Find common PO number labels across layouts."""
+    patterns = [
+        r"\bservice\s+purchase\s+order\s+([A-Z0-9\/\-.]+)",
+        r"\bpurchase\s+order\s+no\.?\s*:?\s*([A-Z0-9\/\-.]+)",
+        r"\bpo\s*number\s*:?\s*([A-Z0-9\/\-.]+)",
+        r"\bpo\s*no\.?\s*:?\s*([A-Z0-9\/\-.]+)",
+        r"\bpo\s*:\s*([A-Z0-9\/\-.]+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+def extract_total_amount(text: str) -> str | None:
+    """Find the strongest final total amount signal."""
+    patterns = [
+        r"\bgrand\s+total\b[^\d-]*(-?\d[\d,]*(?:\.\d+)?)",
+        r"\bround\s+off\s+total\s*\(?INR\)?[^\d-]*(-?\d[\d,]*(?:\.\d+)?)",
+        r"\bgross\s+value\b[^\d-]*INR?\s*(-?\d[\d,]*(?:\.\d+)?)",
+        r"\bnet\s+value\b[^\d-]*INR?\s*(-?\d[\d,]*(?:\.\d+)?)",
+        r"\btotal\s+value\b[^\d-]*INR?\s*(-?\d[\d,]*(?:\.\d+)?)",
+        r"\btotal\s+amount\b[^\d-]*(-?\d[\d,]*(?:\.\d+)?)",
+    ]
+    for pattern in patterns:
+        matches = re.findall(pattern, text, re.IGNORECASE)
+        if matches:
+            return normalize_amount(matches[-1])
+    return None
+
+
+def extract_vendor_gst(text: str, buyer_company: str | None, vendor_company: str | None) -> str | None:
+    """Pick the GST that is most strongly associated with vendor/supplier context."""
+    occurrences = collect_gst_occurrences(text, buyer_company, vendor_company)
+    vendor_gst = choose_vendor_gst_from_context(occurrences)
+    return vendor_gst.gst if vendor_gst else None
+
+
+def normalize_column_name(name: str) -> str:
+    """Map varied table headers to one canonical item column name."""
+    lowered = re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
+    if lowered in {"sr", "sr no", "s no", "no", "item no"}:
+        return "item_no"
+    if lowered in {"item", "product name", "service no", "service number"}:
+        return "item_name"
+    if "desc" in lowered or lowered == "services":
+        return "item_description"
+    if "hsn" in lowered or "sac" in lowered:
+        return "hsn_sac"
+    if lowered in {"qty", "quantity"}:
+        return "quantity"
+    if lowered in {"uom", "unit", "unit type"}:
+        return "uom"
+    if "unit price" in lowered or lowered == "rate" or "unit rate" in lowered:
+        return "unit_price"
+    if "igst" in lowered or "cgst" in lowered or "sgst" in lowered or "tax" in lowered:
+        return "tax_percent"
+    if "amount" in lowered or "total" in lowered or "value" in lowered:
+        return "line_total"
+    return lowered.replace(" ", "_")
+
+
+def is_item_header_row(row: list[str]) -> bool:
+    """Detect whether a cleaned table row is the header of an item table."""
+    joined = " ".join(row).lower()
+    hits = sum(1 for keyword in ITEM_HEADER_KEYWORDS if keyword in joined)
+    has_qty = "qty" in joined or "quantity" in joined
+    has_amount = "amount" in joined or "rate" in joined or "price" in joined or "value" in joined
+    return hits >= 3 and (has_qty or has_amount)
+
+
+def normalize_item_row(raw_row: dict[str, str] | list[str], file_name: str = "", po_number: str | None = None) -> dict[str, str]:
+    """Convert a raw row from any supported PO format into the standard item schema."""
+    if isinstance(raw_row, list):
+        raw_map = {str(idx): value for idx, value in enumerate(raw_row)}
+    else:
+        raw_map = raw_row
+
+    normalized = {column: "" for column in ITEM_COLUMNS}
+    normalized["file_name"] = file_name
+    normalized["po_number"] = po_number or ""
+
+    for key, value in raw_map.items():
+        canonical = normalize_column_name(str(key))
+        value = clean_cell(value)
+        if canonical in normalized and value:
+            if canonical == "tax_percent":
+                existing = normalized[canonical]
+                current = normalize_percent(value) or ""
+                normalized[canonical] = current if not existing else max(existing, current, key=lambda x: float(x or 0))
+            else:
+                normalized[canonical] = value
+
+    # Some PDFs expose only item_name or only item_description. Keep both useful.
+    if not normalized["item_description"] and normalized["item_name"]:
+        normalized["item_description"] = normalized["item_name"]
+
+    normalized["unit_price"] = normalize_amount(normalized["unit_price"]) or normalized["unit_price"]
+    normalized["line_total"] = normalize_amount(normalized["line_total"]) or normalized["line_total"]
+    normalized["tax_percent"] = normalize_percent(normalized["tax_percent"]) or normalized["tax_percent"]
+
+    return normalized
 
 
 def extract_po_date(text: str) -> str | None:
@@ -649,3 +839,162 @@ def extract_fields(full_text: str, retrieved_contexts: list[str] | None = None) 
             vendor_gst_source=vendor_context_gst.source_text if vendor_context_gst else None,
         ),
     )
+
+
+def extract_header_fields(file_name: str, full_text: str, retrieved_contexts: list[str] | None = None) -> dict[str, str]:
+    """Build one normalized PO header row from existing field extraction logic."""
+    result = extract_fields(full_text, retrieved_contexts)
+    buyer_name = result.debug.get("detected_buyer_company")
+    vendor_name = result.debug.get("detected_vendor_company")
+    vendor_gst = extract_vendor_gst(full_text, buyer_name, vendor_name)
+    warnings = list(result.warnings)
+
+    row = {
+        "file_name": file_name,
+        "po_number": extract_po_number(full_text) or "",
+        "po_date": result.po_date or "",
+        "buyer_name": buyer_name or "",
+        "billing_address": result.billing_address or "",
+        "billing_gst_number": result.billing_gst or "",
+        "vendor_name": vendor_name or "",
+        "vendor_gst_number": vendor_gst or "",
+        "total_amount": extract_total_amount(full_text) or "",
+        "extraction_status": "Completed" if not warnings else "Needs review",
+        "warnings": "; ".join(warnings),
+        "debug": result.debug,
+    }
+    return row
+
+
+def table_rows_from_pdf(pdf_path: str | Path) -> list[list[list[str]]]:
+    """Extract raw tables from PDF pages with pdfplumber before text fallback."""
+    tables: list[list[list[str]]] = []
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            for table in page.extract_tables() or []:
+                cleaned_table = [
+                    [clean_cell(cell) for cell in row]
+                    for row in table
+                    if row and any(clean_cell(cell) for cell in row)
+                ]
+                if cleaned_table:
+                    tables.append(cleaned_table)
+    return tables
+
+
+def rows_from_detected_table(table: list[list[str]], file_name: str, po_number: str | None) -> list[dict[str, str]]:
+    """Find a header row in a raw table and normalize subsequent item rows."""
+    item_rows: list[dict[str, str]] = []
+    for idx, row in enumerate(table):
+        if not is_item_header_row(row):
+            continue
+
+        headers = [normalize_column_name(cell or f"column_{col_idx}") for col_idx, cell in enumerate(row)]
+        for data_row in table[idx + 1 :]:
+            if len([cell for cell in data_row if cell]) < 2:
+                continue
+            joined = " ".join(data_row).lower()
+            if any(stop in joined for stop in ["grand total", "round off", "amount in words", "terms", "payment terms"]):
+                break
+
+            raw_map = {}
+            for col_idx, header in enumerate(headers):
+                if col_idx < len(data_row):
+                    raw_map[header] = data_row[col_idx]
+
+            normalized = normalize_item_row(raw_map, file_name=file_name, po_number=po_number)
+            if normalized["item_no"] or normalized["item_name"] or normalized["item_description"]:
+                item_rows.append(normalized)
+        break
+    return item_rows
+
+
+def parse_text_item_lines(full_text: str, file_name: str, po_number: str | None) -> list[dict[str, str]]:
+    """Fallback parser for item rows when PDF table detection misses the table."""
+    items: list[dict[str, str]] = []
+    lines = normalize_lines(full_text)
+
+    for line in lines:
+        lowered = line.lower()
+        if any(skip in lowered for skip in ["grand total", "total amount", "amount in words", "payment terms"]):
+            continue
+
+        # Castlight-style rows: 1 Equipment Expense ... 1 Pcs 69000 69,000.00
+        castlight = re.match(
+            r"^(?P<item_no>\d+)\s+(?P<desc>.+?)\s+(?P<qty>\d+(?:\.\d+)?)\s+"
+            r"(?P<uom>Pcs|Nos|Numbers|EA|Unit|Units)\s+(?P<rate>\d[\d,]*(?:\.\d+)?)\s+"
+            r"(?P<amount>\d[\d,]*(?:\.\d+)?)$",
+            line,
+            re.IGNORECASE,
+        )
+        if castlight:
+            items.append(
+                normalize_item_row(
+                    {
+                        "item_no": castlight.group("item_no"),
+                        "item_description": castlight.group("desc"),
+                        "quantity": castlight.group("qty"),
+                        "uom": castlight.group("uom"),
+                        "unit_price": castlight.group("rate"),
+                        "line_total": castlight.group("amount"),
+                    },
+                    file_name=file_name,
+                    po_number=po_number,
+                )
+            )
+            continue
+
+        # TVS-style rows often include item no, description, SAC, qty, amount, tax columns.
+        tvs = re.match(
+            r"^(?P<item_no>\d{3,})\s+(?P<desc>.+?)\s+(?P<hsn>\d{6})\s+"
+            r"(?P<qty>\d+(?:\.\d+)?)\s+(?P<amount>\d[\d,]*(?:\.\d+)?)\s+"
+            r"(?P<cgst>\d+(?:\.\d+)?)\s+(?P<sgst>\d+(?:\.\d+)?)\s+(?P<igst>\d+(?:\.\d+)?)",
+            line,
+            re.IGNORECASE,
+        )
+        if tvs:
+            tax_percent = tvs.group("igst") if float(tvs.group("igst")) > 0 else tvs.group("cgst")
+            items.append(
+                normalize_item_row(
+                    {
+                        "item_no": tvs.group("item_no"),
+                        "item_description": tvs.group("desc"),
+                        "hsn_sac": tvs.group("hsn"),
+                        "quantity": tvs.group("qty"),
+                        "unit_price": tvs.group("amount"),
+                        "tax_percent": tax_percent,
+                    },
+                    file_name=file_name,
+                    po_number=po_number,
+                )
+            )
+    return items
+
+
+def extract_item_tables(pdf_path: str | Path, full_text: str, file_name: str, po_number: str | None = None) -> list[dict[str, str]]:
+    """Extract line items using pdfplumber tables first, then text fallback."""
+    item_rows: list[dict[str, str]] = []
+
+    try:
+        for table in table_rows_from_pdf(pdf_path):
+            item_rows.extend(rows_from_detected_table(table, file_name=file_name, po_number=po_number))
+    except Exception:
+        # If table extraction fails for a PDF, text fallback still gives us a chance.
+        item_rows = []
+
+    if not item_rows:
+        item_rows = parse_text_item_lines(full_text, file_name=file_name, po_number=po_number)
+
+    return item_rows
+
+
+def build_header_dataframe(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    """Build a stable header DataFrame ready for CSV or database insertion."""
+    cleaned_rows = [{column: row.get(column, "") for column in HEADER_COLUMNS} for row in rows]
+    return pd.DataFrame(cleaned_rows, columns=HEADER_COLUMNS)
+
+
+def build_items_dataframe(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    """Build a stable line-item DataFrame ready for CSV or database insertion."""
+    cleaned_rows = [{column: row.get(column, "") for column in ITEM_COLUMNS} for row in rows]
+    return pd.DataFrame(cleaned_rows, columns=ITEM_COLUMNS)
