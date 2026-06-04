@@ -1,46 +1,49 @@
 # PO Info Extractor
 
-A local Streamlit app that extracts these fields from Purchase Order PDFs:
+PO Info Extractor is a Streamlit application backed by a Flask API for extracting structured data from Purchase Order PDF files.
 
-- PO Date
-- Billing Address / Bill To / Buyer Address
-- Billing GST Number only
+The Streamlit UI uploads PDFs to `flask_api.py`. The Flask API processes each PDF with the existing utilities in `utils/` and saves extracted PO headers and line items to MySQL through `utils/database.py`.
 
-The app does not use OpenAI or any paid API. It extracts PDF text with `pdfplumber`, chunks the text, stores local sentence-transformer embeddings in ChromaDB, retrieves relevant context, then uses rule-based and context-aware logic to avoid returning vendor/supplier GST as billing GST.
+## Architecture
+
+```text
+PDF upload
+  -> Streamlit UI in app.py
+  -> Flask API in flask_api.py
+  -> utils/pdf_reader.py, chunker.py, vector_store.py, extractor.py
+  -> extracted PO headers and line items
+  -> MySQL save through utils/database.py
+  -> JSON/CSV exports
+```
+
+The extraction logic remains rule-based and local. It does not require OpenAI or any paid API.
 
 ## Folder Structure
 
 ```text
-PO Info Extractor/
+PO-Info-Extractor/
   app.py
+  flask_api.py
   requirements.txt
   README.md
+  db_schema.sql
+  .gitignore
+  .streamlit/
+    config.toml
   utils/
     __init__.py
     pdf_reader.py
     chunker.py
     vector_store.py
     extractor.py
-  uploads/
-  outputs/
-  chroma_db/
+    database.py
 ```
 
-## Run Commands
+Generated runtime folders such as `uploads/`, `outputs/`, `chroma_db/`, and `chroma_tmp/` are ignored by Git.
 
-Install Python 3.11 or 3.12 first. The easiest Windows command is:
+## Environment Setup
 
-```powershell
-winget install Python.Python.3.12
-```
-
-Close PowerShell, open it again, and confirm Python 3.12 is detected:
-
-```powershell
-py -0p
-```
-
-Then open PowerShell in this folder:
+Use Python 3.11 or 3.12.
 
 ```powershell
 cd "D:\Bhumi\Team Computers\PO Info Extractor"
@@ -48,86 +51,99 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install -r requirements.txt
+```
+
+MySQL settings are currently configured directly in `utils/database.py` for local development:
+
+```text
+host: localhost
+port: 3306
+user: root
+password: @bhumi1234
+database: po_extractor
+```
+
+## Run The App
+
+Terminal 1:
+
+```powershell
+python flask_api.py
+```
+
+The Flask API runs at:
+
+```text
+http://127.0.0.1:5000
+```
+
+Terminal 2:
+
+```powershell
 streamlit run app.py
 ```
 
-If you installed Python 3.11 instead of 3.12, use:
-
-```powershell
-py -3.11 -m venv .venv
-```
-
-If `winget` is not available, download Python 3.12 from:
-
-```text
-https://www.python.org/downloads/release/python-31210/
-```
-
-During installation, enable **Add python.exe to PATH**.
-
-Then open the local URL Streamlit shows, usually:
+This project includes `.streamlit/config.toml`, so Streamlit runs in headless mode by default. Open:
 
 ```text
 http://localhost:8501
 ```
 
-## Notes
+## API Endpoints
 
-- The first run may take time because `sentence-transformers/all-MiniLM-L6-v2` must download once.
-- Scanned/image-only PDFs need OCR first. `pdfplumber` can only read selectable text.
-- Extracted CSV files are saved in `outputs/`.
-- Every extraction is also saved as JSON in `outputs/<uploaded_filename>.json`.
-- Uploaded PDFs are saved in `uploads/`.
-- ChromaDB data is stored in `chroma_db/`.
+```text
+GET  /health
+POST /extract
+GET  /headers
+GET  /items
+```
 
-## Later Ollama Hook
+`POST /extract` accepts one or more PDF files as multipart field `files`. The response includes:
 
-The current app intentionally avoids LLM calls. If you later want to add Ollama, the best place is after retrieval in `app.py`: send `retrieved_contexts` to a local Ollama prompt and compare/merge its JSON response with the rule-based result from `utils/extractor.py`.
+- `headers`
+- `items`
+- `warnings`
+- `database_save_status`
+- `database_counts`
+- `results`
 
 ## MySQL Setup
 
-The app automatically saves extracted PO headers and line items into MySQL after processing PDFs.
-
-Default MySQL settings are defined in `utils/database.py`:
-
-```text
-host = localhost
-user = root
-password = @bhumi1234
-database = po_extractor
-```
-
-Create the database manually if you want to verify setup before running the app:
+The app creates the configured database and tables automatically when saving extracted data. You can also create them manually:
 
 ```powershell
 mysql -u root -p
 ```
 
-Then run:
-
 ```sql
 CREATE DATABASE IF NOT EXISTS po_extractor;
 USE po_extractor;
+SOURCE db_schema.sql;
 ```
 
-The app also creates the database and tables automatically when PDFs are processed.
+If MySQL is unavailable or credentials are wrong, extraction still returns local JSON/CSV output from the Flask API. The Streamlit UI shows the MySQL connection or save error.
 
-To change the password, edit `MYSQL_CONFIG` in:
+## Streamlit Features
 
-```text
-utils/database.py
-```
+- Upload one or more PO PDFs to the Flask API.
+- Review extracted PO headers, billing details, GST fields, totals, and line items.
+- Save extraction results to MySQL from the API.
+- View latest MySQL records through the API.
+- Download extracted data as CSV and JSON.
+- Clear the local vector database cache from the UI.
 
-After processing PDFs, verify saved data:
+## Notes
 
-```sql
-USE po_extractor;
-SELECT * FROM po_headers;
-SELECT * FROM po_items;
-```
+- The first extraction may take time because `sentence-transformers/all-MiniLM-L6-v2` loads locally.
+- Scanned or image-only PDFs need OCR before extraction. `pdfplumber` reads selectable text only.
+- Uploaded PDFs are saved in `uploads/`.
+- JSON and CSV outputs are saved in `outputs/`.
+- Chroma and temporary vector data are ignored by Git.
 
-If MySQL is not running or credentials are wrong, CSV and JSON exports still work. The app will show:
+## Future Scope
 
-```text
-MySQL connection failed. Please check MySQL service, username, password, and database.
-```
+- OCR support for scanned PDFs
+- LLM-based assistant responses
+- PDF preview beside extracted fields
+- User authentication
+- Export templates for ERP upload

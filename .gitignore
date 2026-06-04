@@ -4,7 +4,7 @@ __pycache__/
 *.py[cod]
 
 chroma_db/
-chroma db/
+chroma_tmp/
 uploads/
 outputs/
 

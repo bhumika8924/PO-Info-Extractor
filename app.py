@@ -1,102 +1,26 @@
-import hashlib
 import html
 import json
 import shutil
-import traceback
-from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-
-from utils.chunker import split_text_into_chunks
-from utils.database import (
-    MYSQL_CONFIG,
-    get_database_counts,
-    get_latest_records,
-    save_extraction_to_mysql,
+from utils.po_processor import (
+    database_status,
+    database_summary,
+    process_uploaded_pdfs,
 )
-from utils.extractor import (
-    build_header_dataframe,
-    build_items_dataframe,
-    extract_header_fields,
-    extract_item_tables,
-)
-from utils.pdf_reader import extract_text_from_pdf
-from utils.vector_store import LocalVectorStore
 
 
-APP_TITLE = "PO Info Extractor"
 BASE_DIR = Path(__file__).parent
-UPLOAD_DIR = BASE_DIR / "uploads"
 OUTPUT_DIR = BASE_DIR / "outputs"
 CHROMA_DIR = BASE_DIR / "chroma_db"
 CHROMA_TMP_DIR = BASE_DIR / "chroma_tmp"
-RAG_QUERY = "PO date billing address buyer GST bill to GST"
-DEFAULT_CONTEXT_COUNT = 5
 
 
-UPLOAD_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 CHROMA_DIR.mkdir(exist_ok=True)
 CHROMA_TMP_DIR.mkdir(exist_ok=True)
-
-
-@st.cache_resource(show_spinner="Loading local embedding model...")
-def get_vector_store() -> LocalVectorStore:
-    """Load the embedding model once so the app stays fast after first use."""
-    return LocalVectorStore(persist_dir=CHROMA_DIR)
-
-
-def safe_filename(filename: str) -> str:
-    """Create a simple safe filename for saving uploads locally."""
-    keep = []
-    for char in filename:
-        keep.append(char if char.isalnum() or char in (".", "-", "_") else "_")
-    return "".join(keep)
-
-
-def collection_name_for_file(file_bytes: bytes, unique_suffix: str = "") -> str:
-    """Chroma collection names need to be short and URL-safe."""
-    digest = hashlib.md5(file_bytes).hexdigest()[:16]
-    suffix = f"_{unique_suffix}" if unique_suffix else ""
-    return f"po_{digest}{suffix}"[:63].strip("_")
-
-
-def build_csv_bytes(result_rows: list[dict[str, str]]) -> bytes:
-    """Convert extraction result to downloadable CSV bytes."""
-    df = pd.DataFrame(result_rows)
-    return df.to_csv(index=False).encode("utf-8")
-
-
-def json_safe_distance(distance: object) -> float | None:
-    """Convert Chroma distance values to plain JSON-friendly floats."""
-    if distance is None:
-        return None
-    try:
-        return float(distance)
-    except (TypeError, ValueError):
-        return None
-
-
-def format_retrieved_context(retrieved_rows: list[dict]) -> list[dict]:
-    """Convert retrieved rows into JSON-friendly source context entries."""
-    return [
-        {
-            "rank": idx,
-            "distance": json_safe_distance(row.get("distance")),
-            "metadata": row.get("metadata", {}),
-            "text": row.get("text", ""),
-        }
-        for idx, row in enumerate(retrieved_rows, start=1)
-    ]
-
-
-def save_json_result(file_name: str, payload: dict) -> Path:
-    """Save one JSON file per uploaded PDF using the original PDF name."""
-    json_output_path = OUTPUT_DIR / f"{Path(safe_filename(file_name)).stem}.json"
-    json_output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return json_output_path
 
 
 def reset_persistent_vector_database() -> tuple[bool, str]:
@@ -114,155 +38,6 @@ def reset_persistent_vector_database() -> tuple[bool, str]:
         return True, "Vector database cache cleared."
     except Exception as exc:
         return False, f"Could not clear vector database cache: {type(exc).__name__}: {exc}"
-
-
-def process_uploaded_pdf(uploaded_file, vector_store: LocalVectorStore, run_id: str, file_index: int) -> dict:
-    """Process one PDF and return a row, details, and JSON payload."""
-    step = "starting"
-    logs: list[str] = []
-    file_bytes = uploaded_file.getvalue()
-    saved_path = UPLOAD_DIR / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{safe_filename(uploaded_file.name)}"
-
-    def log_step(current_step: str) -> None:
-        logs.append(f"{datetime.now().isoformat(timespec='seconds')} | {uploaded_file.name} | {current_step}")
-
-    base_payload = {
-        "file_name": uploaded_file.name,
-        "saved_pdf_path": str(saved_path),
-        "extracted_at": datetime.now().isoformat(timespec="seconds"),
-        "po_date": None,
-        "po_number": None,
-        "buyer_name": None,
-        "billing_address": None,
-        "billing_gst_number": None,
-        "vendor_name": None,
-        "vendor_gst_number": None,
-        "total_amount": None,
-        "items": [],
-        "extraction_status": "Failed",
-        "warnings": [],
-        "error": None,
-        "failed_step": None,
-        "logs": logs,
-        "debug": {},
-        "retrieved_context": [],
-    }
-
-    try:
-        step = "save upload"
-        log_step(step)
-        saved_path.write_bytes(file_bytes)
-        base_payload["saved_pdf_path"] = str(saved_path)
-
-        step = "extract PDF text"
-        log_step(step)
-        pdf_text = extract_text_from_pdf(saved_path)
-        if not pdf_text.strip():
-            raise ValueError(
-                "No selectable text was found. This may be a scanned or image-only PDF."
-            )
-
-        step = "split text into chunks"
-        log_step(step)
-        chunks = split_text_into_chunks(pdf_text)
-        if not chunks:
-            raise ValueError("Text was found, but it could not be split into searchable sections.")
-
-        step = "create isolated vector collection"
-        log_step(step)
-        collection_name = collection_name_for_file(file_bytes, f"{run_id}_{file_index}")
-        vector_store.add_chunks(collection_name, chunks, uploaded_file.name)
-
-        step = "retrieve source context"
-        log_step(step)
-        retrieved_rows = vector_store.query(collection_name, RAG_QUERY, top_k=DEFAULT_CONTEXT_COUNT)
-        retrieved_contexts = [row["text"] for row in retrieved_rows]
-
-        step = "extract PO header fields"
-        log_step(step)
-        header_row = extract_header_fields(uploaded_file.name, pdf_text, retrieved_contexts)
-
-        step = "extract PO line items"
-        log_step(step)
-        item_rows = extract_item_tables(
-            saved_path,
-            pdf_text,
-            file_name=uploaded_file.name,
-            po_number=header_row.get("po_number"),
-        )
-
-        warnings = [warning for warning in header_row.get("warnings", "").split("; ") if warning]
-        if not item_rows:
-            warnings.append("Line items not found.")
-        status = "Completed" if not warnings else "Needs review"
-        header_row["extraction_status"] = status
-        header_row["warnings"] = "; ".join(warnings)
-
-        payload = {
-            **base_payload,
-            "po_number": header_row.get("po_number") or None,
-            "po_date": header_row.get("po_date") or None,
-            "buyer_name": header_row.get("buyer_name") or None,
-            "billing_address": header_row.get("billing_address") or None,
-            "billing_gst_number": header_row.get("billing_gst_number") or None,
-            "vendor_name": header_row.get("vendor_name") or None,
-            "vendor_gst_number": header_row.get("vendor_gst_number") or None,
-            "total_amount": header_row.get("total_amount") or None,
-            "items": item_rows,
-            "extraction_status": status,
-            "warnings": warnings,
-            "failed_step": None,
-            "logs": logs,
-            "debug": header_row.get("debug", {}),
-            "retrieved_context": format_retrieved_context(retrieved_rows),
-        }
-        step = "save individual JSON"
-        log_step(step)
-        json_output_path = save_json_result(uploaded_file.name, payload)
-
-        return {
-            "header_row": header_row,
-            "item_rows": item_rows,
-            "payload": payload,
-            "json_output_path": json_output_path,
-            "retrieved_rows": retrieved_rows,
-            "error": None,
-        }
-
-    except Exception as exc:
-        message = f"{uploaded_file.name} failed during {step}: {type(exc).__name__}: {exc}"
-        logs.append(f"{datetime.now().isoformat(timespec='seconds')} | {message}")
-        payload = {
-            **base_payload,
-            "extraction_status": "Failed",
-            "warnings": [message],
-            "error": message,
-            "failed_step": step,
-            "logs": logs,
-            "traceback": traceback.format_exc(),
-        }
-        json_output_path = save_json_result(uploaded_file.name, payload)
-        header_row = {
-            "file_name": uploaded_file.name,
-            "po_number": "",
-            "po_date": "",
-            "buyer_name": "",
-            "billing_address": "",
-            "billing_gst_number": "",
-            "vendor_name": "",
-            "vendor_gst_number": "",
-            "total_amount": "",
-            "extraction_status": "Failed",
-            "warnings": message,
-        }
-        return {
-            "header_row": header_row,
-            "item_rows": [],
-            "payload": payload,
-            "json_output_path": json_output_path,
-            "retrieved_rows": [],
-            "error": message,
-        }
 
 
 def status_badge(status: str) -> str:
@@ -293,6 +68,12 @@ def dataframe_with_status(df: pd.DataFrame):
     return df.style.map(status_cell_style, subset=["extraction_status"])
 
 
+def remove_empty_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    return df.dropna(axis=1, how="all")
+
+
 def format_numeric_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     """Prepare numeric-looking columns for readable display without changing exports."""
     formatted = df.copy()
@@ -302,14 +83,52 @@ def format_numeric_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame
     return formatted
 
 
-def render_header() -> None:
-    """Render the dashboard title and short business explanation."""
+def check_api_status() -> dict:
+    """Return local Streamlit system status."""
+    return {
+        "api_connected": True,
+        "status": "ok",
+        "database": database_status(),
+    }
+
+
+def process_files_for_streamlit(uploaded_files) -> tuple[bool, dict]:
+    """Process selected PDFs with the shared extraction function."""
+    try:
+        return True, process_uploaded_pdfs(uploaded_files, include_debug=True)
+    except Exception as exc:
+        return False, {
+            "status_code": 500,
+            "success": False,
+            "message": f"Processing failed: {type(exc).__name__}: {exc}",
+            "documents": [],
+            "debug": {"warnings": [f"Processing failed: {type(exc).__name__}: {exc}"]},
+        }
+
+
+def fetch_database_summary() -> dict:
+    """Fetch database totals for the bottom system details expander."""
+    return database_summary()
+
+
+def render_header(status: dict) -> None:
+    """Render the business header with compact health pills."""
+    database = status.get("database") or {}
+    system_label = "System Online" if status.get("api_connected") else "System Offline"
+    database_label = "Database Connected" if database.get("connected") else "Database Unavailable"
+    system_class = "pill-ok" if status.get("api_connected") else "pill-warn"
+    database_class = "pill-ok" if database.get("connected") else "pill-warn"
     st.markdown(
-        """
+        f"""
         <div class="app-header">
-            <h1 class="app-title">Purchase Order Intelligence Platform</h1>
-            <div class="app-subtitle">Bulk PO extraction, buyer details, and line-item analysis</div>
-            <div class="app-note">Upload one or more PO PDFs and review extracted data before exporting.</div>
+            <div>
+                <h1 class="app-title">Purchase Order Intelligence Platform</h1>
+                <div class="app-subtitle">Automate PO extraction, validation, and database storage.</div>
+            </div>
+            <div class="header-pills">
+                <span class="status-pill {system_class}">{system_label}</span>
+                <span class="status-pill {database_class}">{database_label}</span>
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -317,157 +136,136 @@ def render_header() -> None:
 
 
 def render_upload_card():
-    """Render upload/reset controls and show selected files clearly."""
-    with st.container(border=True):
-        st.markdown('<div class="section-title">Upload Purchase Order PDFs</div>', unsafe_allow_html=True)
-        st.write("Add one or more PDF purchase orders for bulk extraction.")
-        reset_col, _ = st.columns([1, 3])
-        with reset_col:
-            if st.button("Clear cache / reset vector database", use_container_width=True):
-                ok, message = reset_persistent_vector_database()
-                if ok:
-                    st.success(message)
-                else:
-                    st.error(message)
+    """Render the upload workflow."""
+    st.markdown(
+        """
+        <div class="upload-card">
+            <div class="section-eyebrow">Document Intake</div>
+            <h2 class="upload-title">Upload Purchase Orders</h2>
+            <p class="upload-copy">Upload multiple PO PDFs to extract buyer details, GST information, and line items.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    uploaded_files = st.file_uploader(
+        "Purchase Order PDFs",
+        type=["pdf"],
+        accept_multiple_files=True,
+        label_visibility="collapsed",
+    )
 
-        uploaded_files = st.file_uploader(
-            "Purchase Order PDFs",
-            type=["pdf"],
-            accept_multiple_files=True,
-            label_visibility="collapsed",
+    if uploaded_files:
+        selected_df = pd.DataFrame(
+            {
+                "File": [file.name for file in uploaded_files],
+                "Size KB": [round(len(file.getvalue()) / 1024, 1) for file in uploaded_files],
+            }
         )
+        st.markdown('<div class="compact-heading">Selected Documents</div>', unsafe_allow_html=True)
+        st.dataframe(selected_df, use_container_width=True, hide_index=True)
 
-        if uploaded_files:
-            st.markdown(f"**Selected files:** {len(uploaded_files)}")
-            selected_df = pd.DataFrame(
-                {
-                    "file_name": [file.name for file in uploaded_files],
-                    "size_kb": [round(len(file.getvalue()) / 1024, 1) for file in uploaded_files],
-                }
-            )
-            st.dataframe(selected_df, use_container_width=True, hide_index=True)
+    action_col, reset_col, _ = st.columns([1.2, 1.2, 3])
+    with action_col:
+        process_clicked = st.button(
+            "Process Documents",
+            type="primary",
+            use_container_width=True,
+            disabled=not uploaded_files,
+        )
+    with reset_col:
+        if st.button("Reset Cache", use_container_width=True):
+            ok, message = reset_persistent_vector_database()
+            if ok:
+                st.success(message)
+            else:
+                st.error(message)
 
-    return uploaded_files
+    return uploaded_files, process_clicked
 
 
 def render_summary_cards(
     total_files: int,
     completed_count: int,
     review_count: int,
-    failed_count: int,
     total_line_items: int,
 ) -> None:
     """Render high-level batch metrics."""
-    cols = st.columns(5)
-    cols[0].metric("Total Files", total_files)
-    cols[1].metric("Successfully Extracted", completed_count)
-    cols[2].metric("Needs Review", review_count)
-    cols[3].metric("Failed", failed_count)
-    cols[4].metric("Total Line Items", total_line_items)
+    cards = [
+        ("Documents Processed", total_files),
+        ("Successfully Extracted", completed_count),
+        ("Needs Review", review_count),
+        ("Line Items Found", total_line_items),
+    ]
+    cols = st.columns(4)
+    for col, (label, value) in zip(cols, cards):
+        with col:
+            st.markdown(
+                f"""
+                <div class="summary-card">
+                    <div class="summary-label">{label}</div>
+                    <div class="summary-value">{value}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
 
-def render_overview_tab(headers_df: pd.DataFrame, summary: dict[str, int]) -> None:
+def render_overview_tab(data_df: pd.DataFrame, summary: dict[str, int]) -> None:
     """Render batch summary and compact header table."""
-    render_summary_cards(
-        summary["total_files"],
-        summary["completed_count"],
-        summary["review_count"],
-        summary["failed_count"],
-        summary["total_line_items"],
-    )
     overview_columns = [
+        "file_name",
+        "po_date",
+        "buyer_name",
+        "billing_state",
+        "billing_gst_number",
+        "extraction_status",
+    ]
+    available_columns = [column for column in overview_columns if column in data_df.columns]
+    st.markdown('<div class="section-title">Recent Processed Files</div>', unsafe_allow_html=True)
+    st.dataframe(
+        dataframe_with_status(data_df[available_columns]),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+def render_data_tab(data_df: pd.DataFrame) -> None:
+    """Render clean PO data table."""
+    detail_columns = [
         "file_name",
         "po_number",
         "po_date",
         "buyer_name",
+        "billing_address",
+        "billing_state",
+        "billing_pincode",
         "billing_gst_number",
-        "extraction_status",
     ]
-    available_columns = [column for column in overview_columns if column in headers_df.columns]
-    st.markdown('<div class="section-title">Quick Review</div>', unsafe_allow_html=True)
+    display_columns = [column for column in detail_columns if column in data_df.columns]
+    st.markdown('<div class="section-title">PO Data</div>', unsafe_allow_html=True)
     st.dataframe(
-        dataframe_with_status(headers_df[available_columns]),
+        dataframe_with_status(data_df[display_columns]),
         use_container_width=True,
         hide_index=True,
-    )
-
-
-def render_header_tab(headers_df: pd.DataFrame) -> None:
-    """Render searchable PO header data without crowding long addresses."""
-    search = st.text_input("Search file name, PO number, or buyer name", key="header_search")
-    statuses = ["All"] + sorted([status for status in headers_df["extraction_status"].dropna().unique()])
-    status_filter = st.selectbox("Status filter", statuses, key="header_status")
-
-    filtered = headers_df.copy()
-    if search:
-        search_mask = (
-            filtered["file_name"].fillna("").str.contains(search, case=False, na=False)
-            | filtered["po_number"].fillna("").str.contains(search, case=False, na=False)
-            | filtered["buyer_name"].fillna("").str.contains(search, case=False, na=False)
-        )
-        filtered = filtered[search_mask]
-    if status_filter != "All":
-        filtered = filtered[filtered["extraction_status"] == status_filter]
-
-    display_columns = [column for column in filtered.columns if column != "billing_address"]
-    st.dataframe(
-        dataframe_with_status(filtered[display_columns]),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    if filtered.empty:
-        st.info("No PO headers match the current filters.")
-        return
-
-    selected_file = st.selectbox(
-        "View billing address for",
-        filtered["file_name"].tolist(),
-        key="billing_address_selector",
-    )
-    selected_row = filtered[filtered["file_name"] == selected_file].iloc[0]
-    address_display = html.escape(selected_row.get("billing_address") or "Billing address not found.")
-    st.markdown(
-        f"""
-        <div class="section-card">
-            <div class="section-title">Billing Address</div>
-            <div class="address-text">{address_display}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
     )
 
 
 def render_items_tab(items_df: pd.DataFrame) -> None:
-    """Render searchable and filterable line-item data."""
-    item_columns = [
-        "file_name",
-        "po_number",
-        "item_no",
-        "item_description",
-        "hsn_sac",
-        "quantity",
-        "uom",
-        "unit_price",
-        "tax_percent",
-        "line_total",
-    ]
-    display_df = items_df[[column for column in item_columns if column in items_df.columns]].copy()
+    """Render searchable line-item data without repeating document-level fields."""
+    display_df = remove_empty_columns(items_df.copy())
 
     if display_df.empty:
         st.info("No line items were extracted.")
         return
 
-    search = st.text_input("Search item description", key="item_search")
-    file_options = ["All"] + sorted(display_df["file_name"].dropna().unique().tolist())
-    file_filter = st.selectbox("File filter", file_options, key="item_file_filter")
-
-    if search:
+    if "item_description" in display_df.columns:
+        search = st.text_input("Search item description", key="item_search")
+    else:
+        search = ""
+    if search and "item_description" in display_df.columns:
         display_df = display_df[
             display_df["item_description"].fillna("").str.contains(search, case=False, na=False)
         ]
-    if file_filter != "All":
-        display_df = display_df[display_df["file_name"] == file_filter]
 
     formatted = format_numeric_columns(display_df, ["quantity", "unit_price", "tax_percent", "line_total"])
     styler = formatted.style.format(
@@ -482,108 +280,57 @@ def render_items_tab(items_df: pd.DataFrame) -> None:
     st.dataframe(styler, use_container_width=True, hide_index=True)
 
 
-def render_verification_tab(processed_items: list[dict]) -> None:
-    """Render one non-nested expander per file for manual verification."""
-    for item in processed_items:
-        payload = item["payload"]
-        with st.expander(f"View details for {payload['file_name']}"):
-            st.markdown(
-                f"**Status:** {status_badge(payload.get('extraction_status') or 'Failed')}",
-                unsafe_allow_html=True,
+def render_filewise_tab(documents: list[dict]) -> None:
+    """Render complete data and item table for each uploaded PDF."""
+    billing_order = [
+        ("Buyer Name", "buyer_name"),
+        ("Billing Address", "billing_address"),
+        ("State", "billing_state"),
+        ("Pincode", "billing_pincode"),
+        ("GST Number", "billing_gst_number"),
+    ]
+    other_order = [
+        ("PO Number", "po_number"),
+        ("PO Date", "po_date"),
+    ]
+    for index, document in enumerate(documents, start=1):
+        data = document.get("data", {})
+        with st.expander(f"PDF {index}: {document.get('file_name')}", expanded=index == 1):
+            billing_df = pd.DataFrame(
+                [{"Field": label, "Value": data.get(key)} for label, key in billing_order]
             )
+            st.markdown("**Billing Information**")
+            st.dataframe(billing_df, use_container_width=True, hide_index=True)
 
-            detail_rows = [
-                ("File Name", payload.get("file_name")),
-                ("PO Number", payload.get("po_number")),
-                ("PO Date", payload.get("po_date")),
-                ("Buyer Name", payload.get("buyer_name")),
-                ("Billing GST Number", payload.get("billing_gst_number")),
-                ("Vendor Name", payload.get("vendor_name")),
-                ("Vendor GST Number", payload.get("vendor_gst_number")),
-                ("Total Amount", payload.get("total_amount")),
-            ]
-            detail_df = pd.DataFrame(
-                [{"field": label, "value": value or "Not found"} for label, value in detail_rows]
+            other_df = pd.DataFrame(
+                [{"Field": label, "Value": data.get(key)} for label, key in other_order]
             )
-            st.dataframe(detail_df, use_container_width=True, hide_index=True)
+            st.markdown("**Purchase Order Information**")
+            st.dataframe(other_df, use_container_width=True, hide_index=True)
 
-            address_display = html.escape(payload.get("billing_address") or "Billing address not found.")
-            st.markdown(
-                f"""
-                <div class="section-card">
-                    <div class="section-title">Billing Address</div>
-                    <div class="address-text">{address_display}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-            st.markdown("**Extracted Line Items**")
-            file_items = payload.get("items") or []
+            st.markdown("**Items**")
+            file_items = document.get("items") or []
             if file_items:
-                st.dataframe(build_items_dataframe(file_items), use_container_width=True, hide_index=True)
+                st.dataframe(remove_empty_columns(pd.DataFrame(file_items)), use_container_width=True, hide_index=True)
             else:
                 st.write("No line items found for this file.")
 
-            warnings = payload.get("warnings") or []
-            if warnings:
-                st.markdown("**Warnings**")
-                for warning in warnings:
-                    st.warning(warning)
-
-            if payload.get("error"):
-                st.error(payload["error"])
-
-            if payload.get("failed_step"):
-                st.markdown("**Failed Step**")
-                st.code(payload["failed_step"])
-
-            logs = payload.get("logs") or []
-            if logs:
-                st.markdown("**Processing Log**")
-                st.code("\n".join(logs))
-
-            st.markdown("**Retrieved Source Context**")
-            source_context = payload.get("retrieved_context") or []
-            if source_context:
-                for context in source_context:
-                    st.markdown(f"Source passage {context['rank']}")
-                    st.write(context.get("text", ""))
-                    if context["rank"] < len(source_context):
-                        st.divider()
-            else:
-                st.write("No source context available for this file.")
-
-
-def render_database_status_card(db_save_result: dict, db_counts: dict) -> None:
-    """Render MySQL connection and save-count status."""
-    connected = bool(db_save_result.get("connected")) and bool(db_counts.get("connected"))
-    status = "MySQL Connected" if connected else "Not Connected"
-    cols = st.columns(5)
-    cols[0].metric("Database Status", status)
-    cols[1].metric("Headers saved in this run", db_save_result.get("headers_saved", 0))
-    cols[2].metric("Items saved in this run", db_save_result.get("items_saved", 0))
-    cols[3].metric("Total headers in database", db_counts.get("headers_count", 0))
-    cols[4].metric("Total items in database", db_counts.get("items_count", 0))
-
 
 def render_downloads_tab(
-    headers_df: pd.DataFrame,
+    data_df: pd.DataFrame,
     items_df: pd.DataFrame,
-    headers_csv_bytes: bytes,
+    data_csv_bytes: bytes,
     items_csv_bytes: bytes,
     json_bytes: bytes,
-    db_save_result: dict,
-    db_counts: dict,
 ) -> None:
     """Render export buttons and saved output paths."""
     st.markdown('<div class="section-title">Export Results</div>', unsafe_allow_html=True)
     col1, col2, col3 = st.columns(3)
     with col1:
         st.download_button(
-            "Download PO Headers CSV",
-            data=headers_csv_bytes,
-            file_name="po_headers.csv",
+            "Download PO Data CSV",
+            data=data_csv_bytes,
+            file_name="po_data.csv",
             mime="text/csv",
             use_container_width=True,
         )
@@ -607,48 +354,41 @@ def render_downloads_tab(
     st.markdown(
         """
         <div class="section-card">
-            <div class="section-title">Saved Files</div>
-            <div class="address-text">outputs/po_headers.csv<br>outputs/po_items.csv<br>outputs/all_extractions.json</div>
+            <div class="section-title">Prepared Files</div>
+            <div class="address-text">PO data, PO items, and combined extraction results are ready for download.</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    st.markdown('<div class="section-title">Database</div>', unsafe_allow_html=True)
-    render_database_status_card(db_save_result, db_counts)
-    config = MYSQL_CONFIG
-    st.markdown(
-        f"""
-        <div class="section-card">
-            <div class="section-title">MySQL Connection Settings</div>
-            <div class="address-text">Host: {html.escape(str(config["host"]))}<br>
-            Port: {html.escape(str(config["port"]))}<br>
-            Database: {html.escape(str(config["database"]))}<br>
-            User: {html.escape(str(config["user"]))}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
 
-    if db_save_result.get("success"):
-        st.success(db_save_result.get("message", "Records stored successfully."))
-    else:
-        st.error(
-            db_save_result.get(
-                "message",
-                "MySQL connection failed. Please check MySQL service, username, password, and database.",
-            )
+def render_system_details(api_status: dict, db_counts: dict, db_save_result: dict) -> None:
+    """Keep technical diagnostics tucked away at the bottom."""
+    database = api_status.get("database") or {}
+    api_label = "Connected" if api_status.get("api_connected") else "Not connected"
+    db_label = "Connected" if database.get("connected") or db_counts.get("connected") else "Not connected"
+    total_headers = db_counts.get("total_headers_in_database", 0)
+    total_items = db_counts.get("total_items_in_database", 0)
+    with st.expander("System Details"):
+        details_df = pd.DataFrame(
+            [
+                {"Field": "API connection status", "Value": api_label},
+                {"Field": "Database connection status", "Value": db_label},
+                {
+                    "Field": "Total data records in database",
+                    "Value": total_headers,
+                },
+                {
+                    "Field": "Total item records in database",
+                    "Value": total_items,
+                },
+            ]
         )
-
-    if st.button("View Latest Saved Records", use_container_width=True):
-        latest = get_latest_records(limit=10)
-        if latest["success"]:
-            st.markdown("**Latest 10 po_headers rows**")
-            st.dataframe(latest["headers"], use_container_width=True, hide_index=True)
-            st.markdown("**Latest 10 po_items rows**")
-            st.dataframe(latest["items"], use_container_width=True, hide_index=True)
-        else:
-            st.error(latest["message"])
+        st.dataframe(details_df, use_container_width=True, hide_index=True)
+        if db_save_result.get("message"):
+            st.caption(db_save_result["message"])
+        elif database.get("message"):
+            st.caption(database["message"])
 
 
 st.set_page_config(page_title="Purchase Order Intelligence Platform", layout="wide")
@@ -656,15 +396,141 @@ st.set_page_config(page_title="Purchase Order Intelligence Platform", layout="wi
 st.markdown(
     """
     <style>
+        :root {
+            --ink: #182230;
+            --muted: #667085;
+            --line: #e4e7ec;
+            --panel: #ffffff;
+            --soft: #f6f8fb;
+            --brand: #2457c5;
+            --brand-dark: #183f91;
+            --success-bg: #e7f8ef;
+            --success-text: #087443;
+            --warn-bg: #fff4e5;
+            --warn-text: #b54708;
+            --danger-bg: #fee4e2;
+            --danger-text: #b42318;
+        }
+        .stApp {
+            background:
+                linear-gradient(180deg, #f7f9fc 0%, #eef3f8 100%);
+            color: var(--ink);
+        }
         .block-container {
-            padding-top: 2.2rem;
-            padding-bottom: 2.5rem;
-            max-width: 1180px;
+            padding-top: 1.7rem;
+            padding-bottom: 3rem;
+            max-width: 1200px;
+        }
+        .app-header,
+        .upload-card,
+        .section-card,
+        .summary-card {
+            background: var(--panel);
+            border: 1px solid rgba(16, 24, 40, 0.08);
+            box-shadow: 0 14px 32px rgba(16, 24, 40, 0.08);
+        }
+        .app-header {
+            align-items: center;
+            border-radius: 14px;
+            display: flex;
+            justify-content: space-between;
+            gap: 24px;
+            margin-bottom: 1.25rem;
+            padding: 24px 28px;
+        }
+        .app-title {
+            color: var(--ink);
+            font-size: 2rem;
+            font-weight: 750;
+            letter-spacing: 0;
+            line-height: 1.15;
+            margin: 0;
+        }
+        .app-subtitle {
+            color: var(--muted);
+            font-size: 1rem;
+            margin-top: 0.45rem;
+        }
+        .header-pills {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            justify-content: flex-end;
+        }
+        .status-pill {
+            border-radius: 999px;
+            display: inline-flex;
+            font-size: 0.86rem;
+            font-weight: 700;
+            line-height: 1;
+            padding: 10px 13px;
+            white-space: nowrap;
+        }
+        .pill-ok {
+            background: var(--success-bg);
+            color: var(--success-text);
+        }
+        .pill-warn {
+            background: var(--warn-bg);
+            color: var(--warn-text);
+        }
+        .upload-card {
+            border-radius: 16px;
+            margin-top: 1rem;
+            padding: 28px 30px 18px;
+        }
+        .section-eyebrow {
+            color: var(--brand);
+            font-size: 0.78rem;
+            font-weight: 800;
+            letter-spacing: 0.08em;
+            margin-bottom: 0.5rem;
+            text-transform: uppercase;
+        }
+        .upload-title {
+            color: var(--ink);
+            font-size: 1.45rem;
+            font-weight: 750;
+            letter-spacing: 0;
+            margin: 0 0 0.45rem;
+        }
+        .upload-copy {
+            color: var(--muted);
+            font-size: 0.98rem;
+            line-height: 1.55;
+            margin: 0;
+            max-width: 720px;
+        }
+        [data-testid="stFileUploader"] {
+            background: #ffffff;
+            border: 1px dashed #b9c3d6;
+            border-radius: 14px;
+            margin-top: -0.15rem;
+            padding: 18px;
+        }
+        [data-testid="stFileUploader"] section {
+            padding: 10px 8px;
+        }
+        .stButton > button,
+        .stDownloadButton > button {
+            border-radius: 10px !important;
+            font-weight: 750 !important;
+            min-height: 42px;
+        }
+        .stButton > button[kind="primary"] {
+            background: var(--brand) !important;
+            border-color: var(--brand) !important;
+            color: #ffffff !important;
+            box-shadow: 0 8px 18px rgba(36, 87, 197, 0.22);
+        }
+        .stButton > button[kind="primary"]:hover {
+            background: var(--brand-dark) !important;
+            border-color: var(--brand-dark) !important;
         }
         [data-testid="stMetric"] {
             background: #ffffff;
-            border: 1px solid #e5e7eb;
-            border-radius: 8px;
+            border: 1px solid var(--line);
+            border-radius: 12px;
             padding: 18px 20px;
             box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
         }
@@ -677,44 +543,43 @@ st.markdown(
             font-size: 1.35rem;
             line-height: 1.4;
         }
-        .app-header {
-            border-bottom: 1px solid #e5e7eb;
-            padding-bottom: 1rem;
-            margin-bottom: 1.5rem;
-        }
-        .app-title {
-            color: #0f172a;
-            font-size: 2rem;
-            font-weight: 700;
-            letter-spacing: 0;
-            margin: 0;
-        }
-        .app-subtitle {
-            color: #64748b;
-            font-size: 1rem;
-            margin-top: 0.35rem;
-        }
-        .app-note {
-            color: #94a3b8;
-            font-size: 0.92rem;
-            margin-top: 0.35rem;
-        }
         .section-card {
-            background: #ffffff;
-            border: 1px solid #e5e7eb;
-            border-radius: 8px;
-            padding: 20px;
-            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
+            border-radius: 14px;
+            padding: 20px 22px;
             margin-top: 1rem;
         }
         .section-title {
-            color: #0f172a;
-            font-size: 1rem;
-            font-weight: 700;
+            color: var(--ink);
+            font-size: 1.05rem;
+            font-weight: 750;
             margin-bottom: 0.75rem;
         }
+        .compact-heading {
+            color: var(--ink);
+            font-size: 0.92rem;
+            font-weight: 750;
+            margin: 1rem 0 0.4rem;
+        }
+        .summary-card {
+            border-radius: 14px;
+            min-height: 116px;
+            padding: 20px 22px;
+        }
+        .summary-label {
+            color: var(--muted);
+            font-size: 0.9rem;
+            font-weight: 700;
+            line-height: 1.35;
+        }
+        .summary-value {
+            color: var(--ink);
+            font-size: 2rem;
+            font-weight: 800;
+            line-height: 1.2;
+            margin-top: 0.65rem;
+        }
         .address-text {
-            color: #1e293b;
+            color: #344054;
             white-space: pre-wrap;
             line-height: 1.6;
             font-size: 0.98rem;
@@ -731,80 +596,158 @@ st.markdown(
             padding: 4px 10px;
         }
         .status-completed {
-            background: #dcfce7;
-            color: #166534;
+            background: var(--success-bg);
+            color: var(--success-text);
         }
         .status-review {
-            background: #ffedd5;
-            color: #9a3412;
+            background: var(--warn-bg);
+            color: var(--warn-text);
         }
         .status-failed {
-            background: #fee2e2;
-            color: #991b1b;
+            background: var(--danger-bg);
+            color: var(--danger-text);
+        }
+        div[data-testid="stTabs"] [role="tablist"] {
+            background: #ffffff;
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            gap: 4px;
+            padding: 6px;
+        }
+        div[data-testid="stTabs"] button[role="tab"] {
+            border-radius: 9px;
+            color: #667085;
+            font-weight: 750;
+            padding: 10px 16px;
+        }
+        div[data-testid="stTabs"] button[aria-selected="true"] {
+            background: #eff4ff;
+            color: var(--brand);
+        }
+        div[data-testid="stDataFrame"] {
+            border-radius: 12px;
+            overflow: hidden;
+        }
+        .stAlert {
+            border-radius: 12px;
+        }
+        @media (max-width: 760px) {
+            .app-header {
+                align-items: flex-start;
+                flex-direction: column;
+            }
+            .header-pills {
+                justify-content: flex-start;
+            }
         }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-render_header()
-uploaded_files = render_upload_card()
+api_status = check_api_status()
+render_header(api_status)
+uploaded_files, process_clicked = render_upload_card()
 
 if not uploaded_files:
-    st.info("Upload one or more Purchase Order PDFs to begin processing.")
+    db_summary = fetch_database_summary() if api_status.get("api_connected") else {}
+    st.markdown(
+        """
+        <div class="section-card">
+            <div class="section-title">Ready When You Are</div>
+            <div class="address-text">Choose one or more purchase order PDFs to begin extraction.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    render_system_details(api_status, db_summary, {})
     st.stop()
 
-try:
-    with st.spinner("Preparing document analysis engine..."):
-        vector_store = LocalVectorStore(persist_dir=None)
-except Exception as exc:
-    st.error(f"Unable to load the document analysis engine: {exc}")
-    st.stop()
+if not process_clicked:
+    current_file_names = tuple(file.name for file in uploaded_files)
+    processed_file_names = st.session_state.get("processed_file_names")
+    if "api_payload" not in st.session_state or processed_file_names != current_file_names:
+        db_summary = fetch_database_summary() if api_status.get("api_connected") else {}
+        st.markdown(
+            """
+            <div class="section-card">
+                <div class="section-title">Documents Ready</div>
+                <div class="address-text">Click Process Documents to extract and validate the selected purchase orders.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        render_system_details(api_status, db_summary, {})
+        st.stop()
+    api_payload = st.session_state["api_payload"]
+else:
+    progress_bar = st.progress(0)
+    progress_text = st.empty()
+    progress_text.write(f"Preparing {len(uploaded_files)} document(s) for processing...")
+    with st.spinner("Processing purchase order documents..."):
+        api_ok, api_payload = process_files_for_streamlit(uploaded_files)
+    progress_bar.progress(1.0)
 
-progress_bar = st.progress(0)
-progress_text = st.empty()
-processed_items: list[dict] = []
-run_id = datetime.now().strftime("%H%M%S%f")
+    if not api_ok:
+        for warning in api_payload.get("debug", {}).get("warnings", [api_payload.get("message", "Processing failed.")]):
+            st.error(warning)
+        db_summary = fetch_database_summary() if api_status.get("api_connected") else {}
+        render_system_details(api_status, db_summary, api_payload.get("debug", {}).get("database_save_status", {}))
+        st.stop()
 
-for index, uploaded_file in enumerate(uploaded_files, start=1):
-    progress_text.write(f"Processing {index} of {len(uploaded_files)}: {uploaded_file.name}")
-    processed_items.append(process_uploaded_pdf(uploaded_file, vector_store, run_id, index))
-    progress_bar.progress(index / len(uploaded_files))
+    st.session_state["api_payload"] = api_payload
+    st.session_state["processed_file_names"] = tuple(file.name for file in uploaded_files)
+    progress_text.write(f"Processed {len(uploaded_files)} document(s).")
 
-progress_text.write(f"Processed {len(uploaded_files)} file(s).")
+documents: list[dict] = api_payload.get("documents", [])
+clean_documents = [
+    {
+        "file_name": document.get("file_name"),
+        "data": document.get("data", {}),
+        "items": document.get("items", []),
+    }
+    for document in documents
+]
+data_rows = [{"file_name": document.get("file_name"), **document.get("data", {})} for document in documents]
+item_rows = [
+    item
+    for document in documents
+    for item in document.get("items", [])
+]
+data_df = pd.DataFrame(data_rows)
+items_df = remove_empty_columns(pd.DataFrame(item_rows))
 
-header_rows = [item["header_row"] for item in processed_items]
-item_rows = [row for item in processed_items for row in item["item_rows"]]
-json_payloads = [item["payload"] for item in processed_items]
-headers_df = build_header_dataframe(header_rows)
-items_df = build_items_dataframe(item_rows)
-
-headers_csv_path = OUTPUT_DIR / "po_headers.csv"
+data_csv_path = OUTPUT_DIR / "po_data.csv"
 items_csv_path = OUTPUT_DIR / "po_items.csv"
 all_json_path = OUTPUT_DIR / "all_extractions.json"
-headers_csv_bytes = headers_df.to_csv(index=False).encode("utf-8")
+data_csv_bytes = data_df.to_csv(index=False).encode("utf-8")
 items_csv_bytes = items_df.to_csv(index=False).encode("utf-8")
-json_bytes = json.dumps(json_payloads, indent=2).encode("utf-8")
-headers_csv_path.write_bytes(headers_csv_bytes)
+json_bytes = json.dumps(
+    {
+        "message": api_payload.get("message"),
+        "status_code": api_payload.get("status_code"),
+        "success": api_payload.get("success"),
+        "documents": clean_documents,
+    },
+    indent=2,
+).encode("utf-8")
+data_csv_path.write_bytes(data_csv_bytes)
 items_csv_path.write_bytes(items_csv_bytes)
 all_json_path.write_bytes(json_bytes)
 
-db_save_result = save_extraction_to_mysql(header_rows, item_rows)
-db_counts = get_database_counts() if db_save_result.get("success") else {
-    "connected": False,
-    "headers_count": 0,
-    "items_count": 0,
-    "message": db_save_result.get("message", ""),
-}
+db_save_result = api_payload.get("debug", {}).get("database_save_status", {})
+db_counts = api_payload.get("debug", {}).get("database_summary", {})
 
-completed_count = sum(1 for row in header_rows if row["extraction_status"] == "Completed")
-review_count = sum(1 for row in header_rows if row["extraction_status"] == "Needs review")
-failed_count = sum(1 for row in header_rows if row["extraction_status"] == "Failed")
+completed_count = sum(
+    1 for document in documents if document.get("debug", {}).get("extraction_status") == "Completed"
+)
+review_count = sum(
+    1 for document in documents if document.get("debug", {}).get("extraction_status") in {"Needs review", "Failed"}
+)
 summary = {
     "total_files": len(uploaded_files),
     "completed_count": completed_count,
     "review_count": review_count,
-    "failed_count": failed_count,
     "total_line_items": len(item_rows),
 }
 
@@ -813,39 +756,38 @@ render_summary_cards(
     summary["total_files"],
     summary["completed_count"],
     summary["review_count"],
-    summary["failed_count"],
     summary["total_line_items"],
 )
 
-overview_tab, header_tab, items_tab, verification_tab, downloads_tab = st.tabs(
+overview_tab, data_tab, items_tab, filewise_tab, downloads_tab = st.tabs(
     [
         "Overview",
-        "PO Header Data",
-        "Line Item Data",
-        "File-wise Verification",
-        "Downloads",
+        "PO Data",
+        "Line Items",
+        "File-wise Results",
+        "Export",
     ]
 )
 
 with overview_tab:
-    render_overview_tab(headers_df, summary)
+    render_overview_tab(data_df, summary)
 
-with header_tab:
-    render_header_tab(headers_df)
+with data_tab:
+    render_data_tab(data_df)
 
 with items_tab:
     render_items_tab(items_df)
 
-with verification_tab:
-    render_verification_tab(processed_items)
+with filewise_tab:
+    render_filewise_tab(documents)
 
 with downloads_tab:
     render_downloads_tab(
-        headers_df,
+        data_df,
         items_df,
-        headers_csv_bytes,
+        data_csv_bytes,
         items_csv_bytes,
         json_bytes,
-        db_save_result,
-        db_counts,
     )
+
+render_system_details(api_status, db_counts, db_save_result)

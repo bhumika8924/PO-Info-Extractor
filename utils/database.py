@@ -12,6 +12,7 @@ except ImportError:  # The app will show a clear message instead of crashing.
 
 MYSQL_CONFIG = {
     "host": "localhost",
+    "port": 3306,
     "user": "root",
     "password": "@bhumi1234",
     "database": "po_extractor",
@@ -37,7 +38,7 @@ def initialize_database() -> None:
     connection = get_connection(database=False)
     cursor = connection.cursor()
     try:
-        cursor.execute("CREATE DATABASE IF NOT EXISTS po_extractor")
+        cursor.execute(f"CREATE DATABASE IF NOT EXISTS `{MYSQL_CONFIG['database']}`")
         connection.commit()
     finally:
         cursor.close()
