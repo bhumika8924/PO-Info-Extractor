@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import traceback
 from datetime import datetime
 from decimal import Decimal
@@ -11,23 +10,24 @@ from typing import Any
 
 import pandas as pd
 
-from utils.chunker import split_text_into_chunks
-from utils.database import (
+from backend.utils.chunker import split_text_into_chunks
+from backend.utils.database import (
     get_connection,
     get_database_counts,
     save_extraction_to_mysql,
 )
-from utils.extractor import (
+from backend.utils.extractor import (
     build_header_dataframe,
     build_items_dataframe,
     extract_header_fields,
     extract_item_tables,
 )
-from utils.pdf_reader import extract_text_from_pdf
-from utils.vector_store import LocalVectorStore
+from backend.utils.output_writer import write_clean_json_outputs, write_json_file
+from backend.utils.pdf_reader import extract_text_from_pdf
+from backend.utils.vector_store import LocalVectorStore
 
 
-BASE_DIR = Path(__file__).resolve().parents[1]
+BASE_DIR = Path(__file__).resolve().parents[2]
 UPLOAD_DIR = BASE_DIR / "uploads"
 OUTPUT_DIR = BASE_DIR / "outputs"
 RAG_QUERY = "PO date billing address buyer GST bill to GST"
@@ -306,8 +306,7 @@ def read_upload(file_obj: Any, fallback_index: int) -> tuple[str, bytes]:
 
 def save_json_result(file_name: str, payload: dict[str, Any]) -> Path:
     output_path = OUTPUT_DIR / f"{Path(safe_filename(file_name)).stem}.json"
-    output_path.write_text(json.dumps(make_json_safe(payload), indent=2), encoding="utf-8")
-    return output_path
+    return write_json_file(output_path, make_json_safe(payload))
 
 
 def base_payload(file_name: str, saved_path: Path, logs: list[str]) -> dict[str, Any]:
@@ -521,7 +520,11 @@ def build_document_response(processed_item: dict[str, Any], include_debug: bool 
     return document
 
 
-def process_uploaded_pdfs(files: list[Any], include_debug: bool = False) -> dict[str, Any]:
+def process_uploaded_pdfs(
+    files: list[Any],
+    include_debug: bool = False,
+    write_outputs: bool = True,
+) -> dict[str, Any]:
     run_id = datetime.now().strftime("%H%M%S%f")
     processed = [process_single_pdf(file_obj, run_id, index) for index, file_obj in enumerate(files, start=1)]
     headers = [item["header_row"] for item in processed]
@@ -535,13 +538,6 @@ def process_uploaded_pdfs(files: list[Any], include_debug: bool = False) -> dict
 
     database_save_status = save_extraction_to_mysql(headers, items)
 
-    headers_df = build_header_dataframe(headers)
-    items_df = build_items_dataframe(items)
-    data_df = pd.DataFrame([document_data_from_header(header) for header in headers])
-    data_df.insert(0, "file_name", [header.get("file_name", "") for header in headers])
-    data_df.to_csv(OUTPUT_DIR / "po_data.csv", index=False)
-    headers_df.to_csv(OUTPUT_DIR / "po_headers.csv", index=False)
-    items_df.to_csv(OUTPUT_DIR / "po_items.csv", index=False)
     documents = [build_document_response(item, include_debug=include_debug) for item in processed]
     response = {
         "message": f"Processed {len(processed)} document(s) successfully.",
@@ -555,8 +551,17 @@ def process_uploaded_pdfs(files: list[Any], include_debug: bool = False) -> dict
             "database_save_status": database_save_status,
             "database_summary": database_summary(),
         }
-    (OUTPUT_DIR / "all_extractions.json").write_text(
-        json.dumps(make_json_safe(response), indent=2),
-        encoding="utf-8",
-    )
-    return make_json_safe(response)
+    safe_response = make_json_safe(response)
+
+    if write_outputs:
+        headers_df = build_header_dataframe(headers)
+        items_df = build_items_dataframe(items)
+        data_df = pd.DataFrame([document_data_from_header(header) for header in headers])
+        data_df.insert(0, "file_name", [header.get("file_name", "") for header in headers])
+        data_df.to_csv(OUTPUT_DIR / "po_data.csv", index=False)
+        headers_df.to_csv(OUTPUT_DIR / "po_headers.csv", index=False)
+        items_df.to_csv(OUTPUT_DIR / "po_items.csv", index=False)
+        write_json_file(OUTPUT_DIR / "all_extractions.json", safe_response)
+        write_clean_json_outputs(safe_response, OUTPUT_DIR, moved_to="manual_upload")
+
+    return safe_response

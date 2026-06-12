@@ -1,4 +1,5 @@
 from decimal import Decimal, InvalidOperation
+import os
 from pathlib import Path
 from typing import Any
 
@@ -10,16 +11,45 @@ except ImportError:  # The app will show a clear message instead of crashing.
     mysql = None
 
 
-MYSQL_CONFIG = {
-    "host": "localhost",
-    "port": 3306,
-    "user": "root",
-    "password": "@bhumi1234",
-    "database": "po_extractor",
-}
+BASE_DIR = Path(__file__).resolve().parents[2]
+BACKEND_DIR = BASE_DIR / "backend"
+SCHEMA_PATH = BACKEND_DIR / "db_schema.sql"
+ENV_PATH = BASE_DIR / ".env"
 
-BASE_DIR = Path(__file__).resolve().parents[1]
-SCHEMA_PATH = BASE_DIR / "db_schema.sql"
+
+def load_local_env() -> None:
+    """Load simple KEY=VALUE pairs from .env without overriding real environment variables."""
+    if not ENV_PATH.exists():
+        return
+
+    for line in ENV_PATH.read_text(encoding="utf-8").splitlines():
+        cleaned = line.strip()
+        if not cleaned or cleaned.startswith("#") or "=" not in cleaned:
+            continue
+        key, value = cleaned.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+load_local_env()
+
+
+def env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+MYSQL_CONFIG = {
+    "host": os.getenv("DB_HOST", "localhost"),
+    "port": env_int("DB_PORT", 3306),
+    "user": os.getenv("DB_USER", "root"),
+    "password": os.getenv("DB_PASSWORD", ""),
+    "database": os.getenv("DB_NAME", "po_extractor"),
+}
 
 
 def get_connection(database: bool = True):

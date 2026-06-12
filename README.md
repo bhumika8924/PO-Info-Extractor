@@ -1,45 +1,218 @@
 # PO Info Extractor
 
-PO Info Extractor is a Streamlit application backed by a Flask API for extracting structured data from Purchase Order PDF files.
+PO Info Extractor extracts structured purchase order data from PDF files. It can be used from a Streamlit app, a Flask API, a React/Vite dashboard, or a local folder watcher.
 
-The Streamlit UI uploads PDFs to `flask_api.py`. The Flask API processes each PDF with the existing utilities in `utils/` and saves extracted PO headers and line items to MySQL through `utils/database.py`.
+The project is now arranged so frontend and backend code are clearly separated.
 
-## Architecture
-
-```text
-PDF upload
-  -> Streamlit UI in app.py
-  -> Flask API in flask_api.py
-  -> utils/pdf_reader.py, chunker.py, vector_store.py, extractor.py
-  -> extracted PO headers and line items
-  -> MySQL save through utils/database.py
-  -> JSON/CSV exports
-```
-
-The extraction logic remains rule-based and local. It does not require OpenAI or any paid API.
-
-## Folder Structure
+## Project Structure
 
 ```text
-PO-Info-Extractor/
-  app.py
-  flask_api.py
-  requirements.txt
-  README.md
-  db_schema.sql
-  .gitignore
-  .streamlit/
-    config.toml
-  utils/
-    __init__.py
-    pdf_reader.py
-    chunker.py
-    vector_store.py
-    extractor.py
-    database.py
+PO Info Extractor/
+  app.py                         Streamlit launcher. Keeps `streamlit run app.py` working.
+  flask_api.py                   Flask launcher. Keeps `python flask_api.py` working.
+  watcher.py                     Folder watcher launcher. Keeps `python watcher.py` working.
+  requirements.txt               Python dependencies.
+  README.md                      Project overview and setup guide.
+  .env                           Local database credentials. Ignored by Git.
+  .streamlit/                    Streamlit local configuration.
+
+  backend/
+    streamlit_app.py             Main Streamlit UI.
+    flask_api.py                 Flask API routes.
+    watcher.py                   Folder automation worker.
+    db_schema.sql                MySQL schema for PO header and item tables.
+    utils/
+      pdf_reader.py              Reads PDF text with pdfplumber.
+      chunker.py                 Splits PDF text into chunks.
+      vector_store.py            Local semantic search helper using ChromaDB.
+      extractor.py               Rule-based PO field and line-item extraction.
+      po_processor.py            Shared extraction pipeline used by all backends.
+      database.py                MySQL connection, table creation, saves, and history reads.
+      output_writer.py           JSON export and processed history writer.
+
+  frontend/
+    package.json                 React/Vite frontend scripts.
+    index.html                   Frontend HTML entrypoint.
+    src/
+      main.js                    React dashboard logic and API calls.
+      styles.css                 React dashboard styling.
+
+  docs/
+    Doc.docx                     Project document/reference file.
+
+  incoming_pdfs/                 Runtime folder for auto-upload input PDFs.
+  processed_pdfs/                Runtime folder for successfully processed PDFs.
+  failed_pdfs/                   Runtime folder for PDFs that need review.
+  uploads/                       Runtime folder for uploaded PDF copies.
+  outputs/                       Runtime folder for CSV/JSON outputs and history.
+  chroma_db/                     Runtime folder for local vector database data.
+  chroma_tmp/                    Runtime folder for temporary vector/cache data.
 ```
 
-Generated runtime folders such as `uploads/`, `outputs/`, `chroma_db/`, and `chroma_tmp/` are ignored by Git.
+Runtime folders are generated locally and should not be committed to Git.
+
+## Tech Stack
+
+### Python
+
+Python is the main backend language. It runs the Streamlit app, Flask API, PDF extraction logic, database code, and folder watcher.
+
+### Streamlit
+
+Streamlit powers the main business UI in `backend/streamlit_app.py`.
+
+It is responsible for:
+- PDF upload screen
+- Auto Upload from Folder status
+- Extraction results tabs
+- Upload History tab
+- CSV/JSON download buttons
+
+Run it with:
+
+```powershell
+streamlit run app.py
+```
+
+`app.py` is only a launcher. The real Streamlit code is in `backend/streamlit_app.py`.
+
+### Flask
+
+Flask powers the HTTP API in `backend/flask_api.py`.
+
+It is responsible for:
+- `/health`
+- `/database-summary`
+- `/extract`
+- `/headers`
+- `/items`
+
+Run it with:
+
+```powershell
+python flask_api.py
+```
+
+`flask_api.py` in the root is only a launcher. The real API code is in `backend/flask_api.py`.
+
+### React and Vite
+
+React/Vite power the optional web frontend in `frontend/`.
+
+It is responsible for:
+- A browser dashboard outside Streamlit
+- Calling the Flask API
+- Showing uploaded/extracted PO data in a frontend app
+
+Run it with:
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+### Pandas
+
+Pandas is used for table/data handling.
+
+It is responsible for:
+- Creating dataframes for Streamlit tables
+- Formatting extracted PO header data
+- Formatting extracted line-item data
+- Creating CSV export bytes
+- Reading MySQL query results into dataframes
+
+### pdfplumber
+
+pdfplumber reads selectable text and tables from PDF files.
+
+It is responsible for:
+- Opening PDF documents
+- Extracting page text
+- Helping detect line-item tables
+
+Image-only scanned PDFs need OCR before this app can extract reliable text.
+
+### ChromaDB and Sentence Transformers
+
+ChromaDB and `sentence-transformers` provide local semantic search over extracted PDF text.
+
+They are used to:
+- Split PDF text into chunks
+- Store chunks locally
+- Retrieve useful context for PO field extraction
+
+No paid API is required.
+
+### MySQL
+
+MySQL stores extracted PO records.
+
+It is responsible for:
+- `po_headers` table for one row per processed PO
+- `po_items` table for line items
+- Upload History data when database records are available
+
+The schema is in:
+
+```text
+backend/db_schema.sql
+```
+
+### watchdog
+
+watchdog powers the folder automation worker in `backend/watcher.py`.
+
+It watches the local input folder and automatically processes new PDFs.
+
+Run it with:
+
+```powershell
+python watcher.py
+```
+
+## Processing Flow
+
+Manual Streamlit upload:
+
+```text
+app.py
+  -> backend/streamlit_app.py
+  -> backend/utils/po_processor.py
+  -> backend/utils/pdf_reader.py
+  -> backend/utils/extractor.py
+  -> backend/utils/database.py
+  -> outputs/
+```
+
+Flask API upload:
+
+```text
+flask_api.py
+  -> backend/flask_api.py
+  -> backend/utils/po_processor.py
+  -> backend/utils/database.py
+```
+
+Auto folder upload:
+
+```text
+watcher.py
+  -> backend/watcher.py
+  -> incoming_pdfs/
+  -> backend/utils/po_processor.py
+  -> processed_pdfs/ or failed_pdfs/
+  -> outputs/
+```
+
+React frontend:
+
+```text
+frontend/
+  -> calls Flask API at http://127.0.0.1:5000
+  -> Flask API runs backend extraction
+```
 
 ## Environment Setup
 
@@ -53,97 +226,49 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-MySQL settings are currently configured directly in `utils/database.py` for local development:
+MySQL settings are loaded from environment variables or the local `.env` file:
 
 ```text
-host: localhost
-port: 3306
-user: root
-password: @bhumi1234
-database: po_extractor
+DB_HOST=localhost
+DB_PORT=3306
+DB_USER=root
+DB_PASSWORD=your_mysql_password
+DB_NAME=po_extractor
 ```
 
-## Run The App
+## Run Commands
 
-Terminal 1:
-
-```powershell
-python flask_api.py
-```
-
-The Flask API runs at:
-
-```text
-http://127.0.0.1:5000
-```
-
-Terminal 2:
+Streamlit app:
 
 ```powershell
 streamlit run app.py
 ```
 
-This project includes `.streamlit/config.toml`, so Streamlit runs in headless mode by default. Open:
-
-```text
-http://localhost:8501
-```
-
-## API Endpoints
-
-```text
-GET  /health
-POST /extract
-GET  /headers
-GET  /items
-```
-
-`POST /extract` accepts one or more PDF files as multipart field `files`. The response includes:
-
-- `headers`
-- `items`
-- `warnings`
-- `database_save_status`
-- `database_counts`
-- `results`
-
-## MySQL Setup
-
-The app creates the configured database and tables automatically when saving extracted data. You can also create them manually:
+Flask API:
 
 ```powershell
-mysql -u root -p
+python flask_api.py
 ```
 
-```sql
-CREATE DATABASE IF NOT EXISTS po_extractor;
-USE po_extractor;
-SOURCE db_schema.sql;
+Folder watcher:
+
+```powershell
+python watcher.py
 ```
 
-If MySQL is unavailable or credentials are wrong, extraction still returns local JSON/CSV output from the Flask API. The Streamlit UI shows the MySQL connection or save error.
+React frontend:
 
-## Streamlit Features
-
-- Upload one or more PO PDFs to the Flask API.
-- Review extracted PO headers, billing details, GST fields, totals, and line items.
-- Save extraction results to MySQL from the API.
-- View latest MySQL records through the API.
-- Download extracted data as CSV and JSON.
-- Clear the local vector database cache from the UI.
+```powershell
+cd frontend
+npm install
+npm run dev
+```
 
 ## Notes
 
-- The first extraction may take time because `sentence-transformers/all-MiniLM-L6-v2` loads locally.
-- Scanned or image-only PDFs need OCR before extraction. `pdfplumber` reads selectable text only.
-- Uploaded PDFs are saved in `uploads/`.
-- JSON and CSV outputs are saved in `outputs/`.
-- Chroma and temporary vector data are ignored by Git.
-
-## Future Scope
-
-- OCR support for scanned PDFs
-- LLM-based assistant responses
-- PDF preview beside extracted fields
-- User authentication
-- Export templates for ERP upload
+- The Streamlit app can run without the React frontend.
+- The React frontend needs the Flask API running.
+- The folder watcher uses the same extraction pipeline as manual upload.
+- CSV/JSON exports are written to `outputs/`.
+- Uploaded PDF copies are written to `uploads/`.
+- The first extraction can take longer because the local sentence-transformer model may need to load.
