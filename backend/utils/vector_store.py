@@ -1,4 +1,6 @@
 from pathlib import Path
+import os
+import re
 from typing import Any
 
 import chromadb
@@ -14,6 +16,7 @@ class LocalVectorStore:
 
     def __init__(self, persist_dir: str | Path | None = "chroma_db", model_name: str = DEFAULT_MODEL_NAME):
         self.use_chroma = True
+        self.model = None
         self.collections: dict[str, dict[str, Any]] = {}
         if persist_dir is None:
             self.persist_dir = None
@@ -32,7 +35,14 @@ class LocalVectorStore:
         except Exception:
             self.client = None
             self.use_chroma = False
-        self.model = SentenceTransformer(model_name)
+
+        try:
+            os.environ.setdefault("HF_HUB_OFFLINE", "1")
+            os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+            self.model = SentenceTransformer(model_name, local_files_only=True)
+        except Exception:
+            self.model = None
+            self.use_chroma = False
 
     def collection_exists(self, collection_name: str) -> bool:
         """Check whether a collection exists before recreating it."""
@@ -73,6 +83,14 @@ class LocalVectorStore:
         if not chunks:
             return collection
 
+        if self.model is None:
+            self.collections[collection_name] = {
+                "documents": chunks,
+                "embeddings": [],
+                "metadatas": [{"source": source_name, "chunk_index": idx} for idx in range(len(chunks))],
+            }
+            return self.collections[collection_name]
+
         embeddings = self.model.encode(chunks, normalize_embeddings=True).tolist()
         if not self.use_chroma:
             self.collections[collection_name] = {
@@ -92,6 +110,9 @@ class LocalVectorStore:
 
     def query(self, collection_name: str, query_text: str, top_k: int = 5) -> list[dict[str, Any]]:
         """Retrieve the chunks most semantically related to the query."""
+        if self.model is None:
+            return self.keyword_query(collection_name, query_text, top_k)
+
         if not self.use_chroma:
             collection = self.collections[collection_name]
             query_embedding = self.model.encode([query_text], normalize_embeddings=True).tolist()[0]
@@ -125,3 +146,37 @@ class LocalVectorStore:
                 }
             )
         return rows
+
+    def keyword_query(self, collection_name: str, query_text: str, top_k: int = 5) -> list[dict[str, Any]]:
+        """Fallback retrieval when local embedding model files are unavailable."""
+        collection = self.collections.get(collection_name, {})
+        documents = collection.get("documents", [])
+        metadatas = collection.get("metadatas", [])
+        query_terms = set(re.findall(r"[a-z0-9]+", query_text.lower()))
+        priority_terms = {
+            "po",
+            "date",
+            "billing",
+            "address",
+            "buyer",
+            "gst",
+            "bill",
+            "purchase",
+            "order",
+            "vendor",
+            "supplier",
+        }
+
+        scored_rows: list[dict[str, Any]] = []
+        for idx, document in enumerate(documents):
+            terms = set(re.findall(r"[a-z0-9]+", document.lower()))
+            score = len(query_terms & terms) + (2 * len(priority_terms & terms))
+            scored_rows.append(
+                {
+                    "text": document,
+                    "metadata": metadatas[idx] if idx < len(metadatas) else {},
+                    "distance": 1 / (score + 1),
+                }
+            )
+
+        return sorted(scored_rows, key=lambda row: row["distance"])[:top_k]

@@ -1,12 +1,492 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>PO Info Extractor</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.js"></script>
-  </body>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PO Info Extractor - PDF Extraction Tool</title>
+  <!-- Modern clean typography from Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <!-- CSS Stylesheet -->
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Ambient background glow elements -->
+  <div class="glow-bg glow-purple"></div>
+  <div class="glow-bg glow-blue"></div>
+  
+  <!-- Star background container -->
+  <div class="stars-container" id="stars-container"></div>
+
+  <div class="app-layout">
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <h1 class="brand-title">PO Info Extractor</h1>
+        <p class="brand-subtitle">PDF Extraction Tool</p>
+      </div>
+
+      <nav class="sidebar-nav">
+        <ul>
+          <li>
+            <button class="nav-item active" data-tab="upload-section">
+              <span class="nav-text">Upload PDF</span>
+            </button>
+          </li>
+          <li>
+            <button class="nav-item" data-tab="auto-upload-section">
+              <span class="nav-text">Auto Upload</span>
+            </button>
+          </li>
+          <li>
+            <button class="nav-item" data-tab="history-section">
+              <span class="nav-text">History</span>
+            </button>
+          </li>
+          <li>
+            <button class="nav-item" data-tab="download-section">
+              <span class="nav-text">Download Info</span>
+            </button>
+          </li>
+        </ul>
+      </nav>
+
+      <div class="sidebar-footer">
+        <p class="footer-text">Version 2.0.0</p>
+      </div>
+    </aside>
+
+    <!-- Main Content Container -->
+    <main class="main-content">
+      
+      <!-- Global Error Alert for connection failures -->
+      <div class="alert-banner hidden" id="connection-error-alert">
+        <div class="alert-icon">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+          </svg>
+        </div>
+        <p class="alert-text">Unable to load records. Please make sure the Flask server is running.</p>
+      </div>
+      
+      <!-- 1. Upload PDF Section -->
+      <section id="upload-section" class="tab-content active">
+        <div class="section-header">
+          <h2 class="section-title">Upload Purchase Orders</h2>
+          <p class="section-subtitle">Select one or more PO PDFs and extract structured data including headers, line items, and billing details.</p>
+        </div>
+
+        <div class="card glassmorphism upload-card">
+          <div class="dropzone" id="dropzone">
+            <input type="file" id="file-input" multiple accept=".pdf" class="file-input">
+            <div class="dropzone-content">
+              <div class="upload-icon-container">
+                <svg class="upload-icon" viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M12 16.5V9.75m0 0l3 3m-3-3l-3 3M6.75 19.5a4.5 4.5 0 01-1.41-8.775 5.25 5.25 0 0110.233-2.33 3 3 0 013.758 3.848A3.752 3.752 0 0118 19.5H6.75z" />
+                </svg>
+              </div>
+              <p class="dropzone-text">Drag and drop your PDF files here, or <span class="browse-link">browse files</span></p>
+              <p class="dropzone-subtext">Accepts .pdf files only</p>
+            </div>
+          </div>
+
+          <!-- File List Section -->
+          <div class="file-list-container hidden" id="file-list-container">
+            <h3 class="container-title">Selected Files</h3>
+            <div class="table-responsive">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>File Name</th>
+                    <th>Size</th>
+                    <th>Status</th>
+                    <th class="text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="file-list-tbody">
+                  <!-- JS will inject rows here -->
+                </tbody>
+              </table>
+            </div>
+
+            <div class="upload-actions">
+              <button class="btn btn-secondary" id="clear-files-btn">Clear Selection</button>
+              <button class="btn btn-primary" id="start-extraction-btn">Start Extraction</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Professional Loading State -->
+        <div class="card glassmorphism extraction-loading-card hidden" id="extraction-loading-card">
+          <div class="loading-header">
+            <div class="spinner"></div>
+            <div class="loading-info">
+              <h3 class="loading-title" id="loading-step-title">Initializing Extraction Pipeline</h3>
+              <p class="loading-subtitle" id="loading-step-desc">Connecting to Gemini API to parse documents.</p>
+            </div>
+          </div>
+          
+          <div class="progress-bar-container">
+            <div class="progress-bar-fill" id="progress-bar-fill"></div>
+          </div>
+          
+          <div class="console-logs" id="console-logs">
+            <!-- Real-time extraction logs will print here -->
+          </div>
+        </div>
+
+        <!-- Real Extraction Results Container (Connected to Backend API) -->
+        <div class="extraction-results-container hidden" id="extraction-results-container">
+          <div class="section-header-compact">
+            <h3 class="section-title-small">Extraction Results</h3>
+            <button class="btn btn-secondary btn-sm" id="reset-upload-btn">Process New Files</button>
+          </div>
+
+          <!-- Tabs Navigation -->
+          <div class="results-tabs">
+            <button class="results-tab-btn active" data-results-tab="overview">Overview</button>
+            <button class="results-tab-btn" data-results-tab="po-data">PO Data</button>
+            <button class="results-tab-btn" data-results-tab="line-items">Line Items</button>
+            <button class="results-tab-btn" data-results-tab="filewise">File-wise Review</button>
+          </div>
+
+          <!-- Tab 1: Overview -->
+          <div class="results-tab-content active" id="results-tab-overview">
+            <!-- Metrics Summary Grid -->
+            <div class="metrics-grid">
+              <div class="metric-card glassmorphism">
+                <span class="metric-label">Files Processed</span>
+                <span class="metric-value" id="metric-total-files">0</span>
+              </div>
+              <div class="metric-card glassmorphism">
+                <span class="metric-label">Completed</span>
+                <span class="metric-value text-success" id="metric-completed-files">0</span>
+              </div>
+              <div class="metric-card glassmorphism">
+                <span class="metric-label">Needs Review</span>
+                <span class="metric-value text-warning" id="metric-review-files">0</span>
+              </div>
+              <div class="metric-card glassmorphism">
+                <span class="metric-label">Total Line Items</span>
+                <span class="metric-value text-cyan" id="metric-total-items">0</span>
+              </div>
+            </div>
+
+            <!-- Overview Dataframe/Table -->
+            <div class="card glassmorphism" style="margin-top: 1.5rem; padding: 2rem;">
+              <h4 class="container-title" style="margin-bottom: 0.5rem;">Extraction Overview</h4>
+              <p class="card-description" style="margin-bottom: 1.5rem;">Quick review of processed files, buyer location, GST details, and status.</p>
+              <div class="table-responsive">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>File Name</th>
+                      <th>PO Date</th>
+                      <th>Buyer Name</th>
+                      <th>Billing State</th>
+                      <th>Billing GSTIN</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody id="overview-tbody">
+                    <!-- JS populated -->
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab 2: PO Header Data -->
+          <div class="results-tab-content" id="results-tab-po-data">
+            <div class="card glassmorphism" style="padding: 2rem;">
+              <h4 class="container-title" style="margin-bottom: 0.5rem;">PO Header Data</h4>
+              <p class="card-description" style="margin-bottom: 1.5rem;">Header-level purchase order details extracted from each PDF.</p>
+              <div class="table-responsive">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>File Name</th>
+                      <th>PO Number</th>
+                      <th>PO Date</th>
+                      <th>Buyer Name</th>
+                      <th>Billing Address</th>
+                      <th>Billing State</th>
+                      <th>Billing Pincode</th>
+                      <th>Billing GSTIN</th>
+                    </tr>
+                  </thead>
+                  <tbody id="po-data-tbody">
+                    <!-- JS populated -->
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab 3: All Line Items -->
+          <div class="results-tab-content" id="results-tab-line-items">
+            <div class="card glassmorphism" style="padding: 2rem;">
+              <h4 class="container-title" style="margin-bottom: 0.5rem;">Line Items</h4>
+              <p class="card-description" style="margin-bottom: 1.5rem;">Item-level descriptions, quantities, rates, tax, and line totals from all files.</p>
+              
+              <!-- Inline search for line items -->
+              <div class="search-container" style="margin-bottom: 1.5rem; max-width: 400px;">
+                <svg class="search-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                </svg>
+                <input type="text" id="line-items-search" class="form-input search-input" placeholder="Search item description...">
+              </div>
+
+              <div class="table-responsive">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>File Name</th>
+                      <th>PO Number</th>
+                      <th>Item No</th>
+                      <th>Item Description</th>
+                      <th>HSN/SAC</th>
+                      <th>Quantity</th>
+                      <th>UOM</th>
+                      <th>Unit Price</th>
+                      <th>Tax %</th>
+                      <th>Line Total</th>
+                    </tr>
+                  </thead>
+                  <tbody id="line-items-tbody">
+                    <!-- JS populated -->
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab 4: File-wise Review (Accordion/Expanders) -->
+          <div class="results-tab-content" id="results-tab-filewise">
+            <div class="card glassmorphism" style="padding: 2rem; margin-bottom: 1.5rem;">
+              <h4 class="container-title" style="margin-bottom: 0.5rem;">File-wise Review</h4>
+              <p class="card-description" style="margin-bottom: 0.5rem;">Expand each PDF to inspect its extracted billing, PO, and item data.</p>
+            </div>
+            
+            <div class="filewise-accordion-container" id="filewise-accordion-container">
+              <!-- Expanders will be injected here by JS -->
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 2. Auto Upload Section -->
+      <section id="auto-upload-section" class="tab-content">
+        <div class="section-header">
+          <h2 class="section-title">Auto Upload</h2>
+          <p class="section-subtitle">Place purchase order PDFs in the local folder and process them automatically using background watcher.</p>
+        </div>
+
+        <!-- Workflow Visualizer -->
+        <div class="card glassmorphism workflow-card">
+          <h3 class="card-title">Folder Processing Workflow</h3>
+          <p class="card-description">PDF files are moved through these directories as the watcher script executes folder actions.</p>
+          
+          <div class="workflow-visualizer">
+            <div class="workflow-step">
+              <div class="step-icon">
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v6m3-3H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </div>
+              <div class="step-info">
+                <h4 class="step-name">incoming_pdfs</h4>
+                <p class="step-desc">Source folder for new PO files</p>
+              </div>
+            </div>
+
+            <div class="workflow-connector">
+              <div class="connector-line"></div>
+              <div class="connector-arrow"></div>
+            </div>
+
+            <div class="workflow-branches">
+              <div class="branch-lane branch-success">
+                <div class="workflow-step">
+                  <div class="step-icon">
+                    <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                  </div>
+                  <div class="step-info">
+                    <h4 class="step-name">processed_pdfs</h4>
+                    <p class="step-desc">Successful extractions are moved here</p>
+                  </div>
+                </div>
+              </div>
+
+              <div class="branch-lane branch-fail">
+                <div class="workflow-step">
+                  <div class="step-icon">
+                    <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                  </div>
+                  <div class="step-info">
+                    <h4 class="step-name">failed_pdfs</h4>
+                    <p class="step-desc">Failed and unparsed PDFs are stored here</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="workflow-connector connector-horizontal">
+              <div class="connector-line"></div>
+              <div class="connector-arrow"></div>
+            </div>
+
+            <div class="workflow-step step-output">
+              <div class="step-icon">
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+              </div>
+              <div class="step-info">
+                <h4 class="step-name">outputs</h4>
+                <p class="step-desc">Extracted JSON structures and combined CSV results</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Command Box -->
+        <div class="card glassmorphism command-card">
+          <h3 class="card-title">Run Watcher Daemon</h3>
+          <p class="card-description">Run the file-system watcher daemon from your root repository command line to enable auto-processing:</p>
+          
+          <div class="command-box">
+            <code class="command-text" id="command-text">python watcher.py</code>
+            <button class="btn btn-secondary btn-icon-only" id="copy-command-btn" aria-label="Copy command to clipboard">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 002 2h2a2 2 0 002-2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
+              </svg>
+              <span class="tooltip" id="copy-tooltip">Copy</span>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 3. History Section -->
+      <section id="history-section" class="tab-content">
+        <div class="section-header">
+          <h2 class="section-title">Upload History</h2>
+          <p class="section-subtitle">Review previously processed purchase orders and check their details.</p>
+        </div>
+
+        <!-- Search & Filter Controls -->
+        <div class="controls-row">
+          <div class="search-container">
+            <svg class="search-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+            <input type="text" id="history-search" class="form-input search-input" placeholder="Search by file name, PO number, or buyer...">
+          </div>
+          
+          <div class="filter-container">
+            <select id="status-filter" class="form-select">
+              <option value="all">All Statuses</option>
+              <option value="completed">Extracted</option>
+              <option value="needs review">Needs Review</option>
+              <option value="failed">Failed</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- History Table Card -->
+        <div class="card glassmorphism history-card">
+          <div class="table-responsive">
+            <table class="data-table" id="history-table">
+              <thead>
+                <tr>
+                  <th>File Name</th>
+                  <th>PO Number</th>
+                  <th>PO Date</th>
+                  <th>Vendor Name</th>
+                  <th>Total Amount</th>
+                  <th>Status</th>
+                  <th>Created At</th>
+                </tr>
+              </thead>
+              <tbody id="history-tbody">
+                <!-- Dynamically populated from backend /headers -->
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Empty State -->
+          <div class="empty-state hidden" id="history-empty-state">
+            <div class="empty-state-icon">
+              <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5m8.25 3v6.75m0 0l-3-3m3 3l3-3M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" />
+              </svg>
+            </div>
+            <h4 class="empty-state-title">No Records Found</h4>
+            <p class="empty-state-desc" id="history-empty-desc">Try modifying your search or filter options to find matching transactions.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- 4. Download Info Section -->
+      <section id="download-section" class="tab-content">
+        <div class="section-header">
+          <h2 class="section-title">Download Extracted Data</h2>
+          <p class="section-subtitle">Download the combined export for all processed purchase orders extracted in database.</p>
+        </div>
+
+        <div class="download-grid">
+          <!-- Card 1: PO Header Data CSV -->
+          <div class="card glassmorphism export-card">
+            <div class="export-icon-container">
+              <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+            </div>
+            <div class="export-details">
+              <h3 class="export-title">PO Header Data CSV</h3>
+              <p class="export-desc">Download a flat table containing header information of all extracted POs, including PO Number, Dates, Vendor Names, Buyer Names, GST detail mappings, and Total Amounts.</p>
+            </div>
+            <button class="btn btn-primary btn-block" id="download-header-csv-btn">Download CSV</button>
+          </div>
+
+          <!-- Card 2: Line Items CSV -->
+          <div class="card glassmorphism export-card">
+            <div class="export-icon-container">
+              <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z" />
+              </svg>
+            </div>
+            <div class="export-details">
+              <h3 class="export-title">Line Items CSV</h3>
+              <p class="export-desc">Download a detailed table of individual purchase order line items, linking item numbers, HSN/SAC numbers, quantities, UOMs, unit prices, tax percentages, and computed totals to parent POs.</p>
+            </div>
+            <button class="btn btn-primary btn-block" id="download-items-csv-btn">Download CSV</button>
+          </div>
+
+          <!-- Card 3: Full Extraction JSON -->
+          <div class="card glassmorphism export-card">
+            <div class="export-icon-container">
+              <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M14.25 9.75L16.5 12l-2.25 2.25m-4.5 0L7.5 12l2.25-2.25M6 20.25h12A2.25 2.25 0 0020.25 18V6A2.25 2.25 0 0018 3.75H6A2.25 2.25 0 003.75 6v12A2.25 2.25 0 006 20.25z" />
+              </svg>
+            </div>
+            <div class="export-details">
+              <h3 class="export-title">Full Extraction JSON</h3>
+              <p class="export-desc">Export the entire schema extraction bundle as a structured JSON object. Ideal for direct database insertion or downstream API integration with ERP systems.</p>
+            </div>
+            <button class="btn btn-primary btn-block" id="download-full-json-btn">Download JSON</button>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <script src="script.js"></script>
+</body>
 </html>

@@ -269,6 +269,9 @@ def document_data_from_header(header_row: dict[str, Any]) -> dict[str, Any]:
         "billing_state": billing_state,
         "billing_pincode": billing_pincode,
         "billing_gst_number": billing_gst_number,
+        "vendor_name": none_if_blank(header_row.get("vendor_name")),
+        "vendor_gst_number": none_if_blank(header_row.get("vendor_gst_number")),
+        "total_amount": none_if_blank(header_row.get("total_amount")),
     }
 
 

@@ -1,6 +1,6 @@
 # PO Info Extractor
 
-PO Info Extractor extracts structured purchase order data from PDF files. It can be used from a Streamlit app, a Flask API, a React/Vite dashboard, or a local folder watcher.
+PO Info Extractor extracts structured purchase order data from PDF files. It can be used from a Streamlit app, a Flask API, a static HTML/CSS/JS dashboard, or a local folder watcher.
 
 The project is now arranged so frontend and backend code are clearly separated.
 
@@ -31,11 +31,10 @@ PO Info Extractor/
       output_writer.py           JSON export and processed history writer.
 
   frontend/
-    package.json                 React/Vite frontend scripts.
+    package.json                 Static frontend dev-server script.
     index.html                   Frontend HTML entrypoint.
-    src/
-      main.js                    React dashboard logic and API calls.
-      styles.css                 React dashboard styling.
+    script.js                    Dashboard logic and Flask API calls.
+    styles.css                   Dashboard styling.
 
   docs/
     Doc.docx                     Project document/reference file.
@@ -95,9 +94,9 @@ python flask_api.py
 
 `flask_api.py` in the root is only a launcher. The real API code is in `backend/flask_api.py`.
 
-### React and Vite
+### Static HTML Frontend
 
-React/Vite power the optional web frontend in `frontend/`.
+Plain HTML, CSS, and JavaScript power the optional web frontend in `frontend/`.
 
 It is responsible for:
 - A browser dashboard outside Streamlit
@@ -111,6 +110,14 @@ cd frontend
 npm install
 npm run dev
 ```
+
+Then open:
+
+```text
+http://127.0.0.1:8080/
+```
+
+`npm run dev` checks `http://127.0.0.1:5000/health` and starts the Flask API automatically when it is not already running.
 
 ### Pandas
 
@@ -206,7 +213,7 @@ watcher.py
   -> outputs/
 ```
 
-React frontend:
+Static frontend:
 
 ```text
 frontend/
@@ -256,13 +263,15 @@ Folder watcher:
 python watcher.py
 ```
 
-React frontend:
+Static frontend:
 
 ```powershell
 cd frontend
 npm install
 npm run dev
 ```
+
+This starts the static frontend and starts/checks the Flask API used for PDF extraction.
 
 ## Notes
 

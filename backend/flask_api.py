@@ -18,7 +18,14 @@ CORS(app)
 @app.get("/")
 @app.get("/health")
 def health():
-    return jsonify({"status": "ok", "database": database_status()})
+    return jsonify(
+        {
+            "status": "ok",
+            "api_version": "2.1.0",
+            "frontend_contract_version": 2,
+            "database": database_status(),
+        }
+    )
 
 
 @app.get("/database-summary")
