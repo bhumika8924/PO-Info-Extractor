@@ -1,23 +1,18 @@
 # PO Info Extractor
 
-PO Info Extractor extracts structured purchase order data from PDF files. It can be used from a Streamlit app, a Flask API, a static HTML/CSS/JS dashboard, or a local folder watcher.
+PO Info Extractor extracts structured purchase order information from PDF files. It supports manual upload from the web page, folder-based Auto Upload and a Flask API used by the HTML/CSS/JS frontend.
 
-The project is now arranged so frontend and backend code are clearly separated.
 
 ## Project Structure
 
 ```text
 PO Info Extractor/
-  app.py                         Streamlit launcher. Keeps `streamlit run app.py` working.
   flask_api.py                   Flask launcher. Keeps `python flask_api.py` working.
-  watcher.py                     Folder watcher launcher. Keeps `python watcher.py` working.
   requirements.txt               Python dependencies.
   README.md                      Project overview and setup guide.
   .env                           Local database credentials. Ignored by Git.
-  .streamlit/                    Streamlit local configuration.
 
   backend/
-    streamlit_app.py             Main Streamlit UI.
     flask_api.py                 Flask API routes.
     watcher.py                   Folder automation worker.
     db_schema.sql                MySQL schema for PO header and item tables.
@@ -26,7 +21,7 @@ PO Info Extractor/
       chunker.py                 Splits PDF text into chunks.
       vector_store.py            Local semantic search helper using ChromaDB.
       extractor.py               Rule-based PO field and line-item extraction.
-      po_processor.py            Shared extraction pipeline used by all backends.
+      po_processor.py            Shared extraction pipeline used by the API and watcher.
       database.py                MySQL connection, table creation, saves, and history reads.
       output_writer.py           JSON export and processed history writer.
 
@@ -54,26 +49,7 @@ Runtime folders are generated locally and should not be committed to Git.
 
 ### Python
 
-Python is the main backend language. It runs the Streamlit app, Flask API, PDF extraction logic, database code, and folder watcher.
-
-### Streamlit
-
-Streamlit powers the main business UI in `backend/streamlit_app.py`.
-
-It is responsible for:
-- PDF upload screen
-- Auto Upload from Folder status
-- Extraction results tabs
-- Upload History tab
-- CSV/JSON download buttons
-
-Run it with:
-
-```powershell
-streamlit run app.py
-```
-
-`app.py` is only a launcher. The real Streamlit code is in `backend/streamlit_app.py`.
+Python is the backend language. It runs the Flask API, PDF extraction logic, database code, and folder watcher.
 
 ### Flask
 
@@ -96,12 +72,13 @@ python flask_api.py
 
 ### Static HTML Frontend
 
-Plain HTML, CSS, and JavaScript power the optional web frontend in `frontend/`.
+Plain HTML, CSS, and JavaScript power the web frontend in `frontend/`.
 
 It is responsible for:
-- A browser dashboard outside Streamlit
+- PDF upload from the browser
 - Calling the Flask API
-- Showing uploaded/extracted PO data in a frontend app
+- Showing uploaded and extracted PO data
+- Loading database history from the API
 
 Run it with:
 
@@ -121,10 +98,9 @@ http://127.0.0.1:8080/
 
 ### Pandas
 
-Pandas is used for table/data handling.
+Pandas is used for table and data handling.
 
 It is responsible for:
-- Creating dataframes for Streamlit tables
 - Formatting extracted PO header data
 - Formatting extracted line-item data
 - Creating CSV export bytes
@@ -159,7 +135,7 @@ MySQL stores extracted PO records.
 It is responsible for:
 - `po_headers` table for one row per processed PO
 - `po_items` table for line items
-- Upload History data when database records are available
+- Upload history data when database records are available
 
 The schema is in:
 
@@ -167,58 +143,33 @@ The schema is in:
 backend/db_schema.sql
 ```
 
-### watchdog
+### Auto Upload
 
-watchdog powers the folder automation worker in `backend/watcher.py`.
-
-It watches the local input folder and automatically processes new PDFs.
-
-Run it with:
-
-```powershell
-python watcher.py
-```
+The website handles Auto Upload through Flask API refresh/process buttons.
+New PDFs are listed from the local input folder and processed from the browser.
 
 ## Processing Flow
-
-Manual Streamlit upload:
-
-```text
-app.py
-  -> backend/streamlit_app.py
-  -> backend/utils/po_processor.py
-  -> backend/utils/pdf_reader.py
-  -> backend/utils/extractor.py
-  -> backend/utils/database.py
-  -> outputs/
-```
 
 Flask API upload:
 
 ```text
-flask_api.py
+frontend/
+  -> calls Flask API at http://127.0.0.1:5000
   -> backend/flask_api.py
   -> backend/utils/po_processor.py
   -> backend/utils/database.py
+  -> outputs/
 ```
 
 Auto folder upload:
 
 ```text
-watcher.py
-  -> backend/watcher.py
-  -> incoming_pdfs/
+frontend refresh/process button
+  -> Flask API auto-upload endpoints
+  -> data/incoming_pdfs/
   -> backend/utils/po_processor.py
-  -> processed_pdfs/ or failed_pdfs/
-  -> outputs/
-```
-
-Static frontend:
-
-```text
-frontend/
-  -> calls Flask API at http://127.0.0.1:5000
-  -> Flask API runs backend extraction
+  -> data/processed_pdfs/ or data/failed_pdfs/
+  -> data/outputs/
 ```
 
 ## Environment Setup
@@ -245,22 +196,10 @@ DB_NAME=po_extractor
 
 ## Run Commands
 
-Streamlit app:
-
-```powershell
-streamlit run app.py
-```
-
 Flask API:
 
 ```powershell
 python flask_api.py
-```
-
-Folder watcher:
-
-```powershell
-python watcher.py
 ```
 
 Static frontend:
@@ -275,9 +214,8 @@ This starts the static frontend and starts/checks the Flask API used for PDF ext
 
 ## Notes
 
-- The Streamlit app can run without the React frontend.
-- The React frontend needs the Flask API running.
-- The folder watcher uses the same extraction pipeline as manual upload.
+- The frontend needs the Flask API running.
+- The folder watcher uses the same extraction pipeline as browser upload.
 - CSV/JSON exports are written to `outputs/`.
 - Uploaded PDF copies are written to `uploads/`.
 - The first extraction can take longer because the local sentence-transformer model may need to load.

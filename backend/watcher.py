@@ -9,14 +9,15 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from backend.utils.output_writer import write_clean_json_outputs, write_response_export_bundle
-from backend.utils.po_processor import process_uploaded_pdfs
+from backend.extraction.po_processor import process_uploaded_pdfs
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-INCOMING_DIR = BASE_DIR / "incoming_pdfs"
-PROCESSED_DIR = BASE_DIR / "processed_pdfs"
-FAILED_DIR = BASE_DIR / "failed_pdfs"
-OUTPUT_DIR = BASE_DIR / "outputs"
+DATA_DIR = BASE_DIR / "data"
+INCOMING_DIR = DATA_DIR / "incoming_pdfs"
+PROCESSED_DIR = DATA_DIR / "processed_pdfs"
+FAILED_DIR = DATA_DIR / "failed_pdfs"
+OUTPUT_DIR = DATA_DIR / "outputs"
 COPY_WAIT_SECONDS = 2
 
 
@@ -29,8 +30,8 @@ def log(message: str) -> None:
 
 
 def ensure_runtime_folders() -> None:
-    for folder in (INCOMING_DIR, PROCESSED_DIR, FAILED_DIR):
-        folder.mkdir(exist_ok=True)
+    for folder in (INCOMING_DIR, PROCESSED_DIR, FAILED_DIR, OUTPUT_DIR):
+        folder.mkdir(parents=True, exist_ok=True)
 
 
 def unique_destination(folder: Path, source_path: Path) -> Path:
@@ -113,7 +114,7 @@ class IncomingPdfHandler(FileSystemEventHandler):
 def main() -> None:
     ensure_runtime_folders()
     log(f"Watching folder: {INCOMING_DIR}")
-    log("Drop a PDF into incoming_pdfs to process it automatically.")
+    log("Drop a PDF into data/incoming_pdfs to process it automatically.")
 
     observer = Observer()
     observer.schedule(IncomingPdfHandler(), str(INCOMING_DIR), recursive=False)

@@ -1,6 +1,6 @@
 """Flask API entrypoint kept for the existing `python flask_api.py` command."""
 
-from backend.flask_api import app
+from backend.api.flask_api import app
 
 
 if __name__ == "__main__":

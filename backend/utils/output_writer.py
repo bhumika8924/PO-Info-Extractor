@@ -27,7 +27,7 @@ def make_json_ready(value: Any) -> Any:
 
 
 def write_json_file(path: Path, payload: Any) -> Path:
-    path.parent.mkdir(exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(make_json_ready(payload), indent=2), encoding="utf-8")
     return path
 
@@ -79,7 +79,7 @@ def write_clean_json_outputs(
     moved_to: str | None = None,
     append_history: bool = True,
 ) -> list[Path]:
-    output_dir.mkdir(exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
     clean_documents = clean_documents_from_response(response, source_pdf=source_pdf, moved_to=moved_to)
     written_paths = []
 
@@ -98,7 +98,7 @@ def write_clean_json_outputs(
 
 
 def write_csv_rows(path: Path, rows: list[dict[str, Any]]) -> Path:
-    path.parent.mkdir(exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     columns = []
     for row in rows:
         for key in row:
@@ -115,7 +115,7 @@ def write_csv_rows(path: Path, rows: list[dict[str, Any]]) -> Path:
 
 def write_response_export_bundle(response: dict[str, Any], output_dir: Path) -> list[Path]:
     """Write the standard CSV/JSON download files from an extraction response."""
-    output_dir.mkdir(exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
     documents = response.get("documents") or []
     data_rows = []
     header_rows = []
