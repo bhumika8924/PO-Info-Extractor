@@ -13,11 +13,13 @@ CREATE TABLE IF NOT EXISTS po_headers (
     total_amount DECIMAL(15,2),
     extraction_status VARCHAR(50),
     warnings TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_po_headers_file_po (file_name, po_number)
 );
 
 CREATE TABLE IF NOT EXISTS po_items (
     id INT AUTO_INCREMENT PRIMARY KEY,
+    po_header_id INT,
     file_name VARCHAR(255),
     po_number VARCHAR(100),
     item_no VARCHAR(50),
@@ -29,5 +31,24 @@ CREATE TABLE IF NOT EXISTS po_items (
     unit_price VARCHAR(50),
     tax_percent VARCHAR(50),
     line_total VARCHAR(50),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_po_items_header_id (po_header_id),
+    CONSTRAINT fk_po_items_header
+        FOREIGN KEY (po_header_id) REFERENCES po_headers(id)
+        ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS po_processing_logs (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    po_header_id INT,
+    file_name VARCHAR(255),
+    po_number VARCHAR(100),
+    extraction_status VARCHAR(50),
+    failed_step VARCHAR(255),
+    message TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_po_logs_header_id (po_header_id),
+    CONSTRAINT fk_po_logs_header
+        FOREIGN KEY (po_header_id) REFERENCES po_headers(id)
+        ON DELETE SET NULL
 );

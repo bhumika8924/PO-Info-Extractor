@@ -839,6 +839,17 @@ html {
   padding: 1.75rem;
 }
 
+.split-layout-grid .billing-info-table {
+  min-width: 0;
+  table-layout: fixed;
+}
+
+.split-layout-grid .billing-info-table td:last-child {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 /* Status Badges */
 .status-badge {
   font-size: 0.72rem;
@@ -1233,6 +1244,50 @@ html {
 
 .download-table .btn {
   white-space: nowrap;
+}
+
+.po-file-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.po-view-link,
+.download-pdf-btn {
+  border: 0;
+  background: transparent;
+  color: var(--text-main);
+  cursor: pointer;
+}
+
+.po-view-link {
+  padding: 0;
+  font: inherit;
+  font-weight: 700;
+  text-align: left;
+}
+
+.po-view-link:hover {
+  color: var(--accent-cyan);
+  text-decoration: underline;
+}
+
+.download-pdf-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 1.9rem;
+  height: 1.9rem;
+  padding: 0;
+  border-radius: 6px;
+  color: var(--accent-cyan);
+  font-size: 1.35rem;
+  line-height: 1;
+}
+
+.download-pdf-btn:hover {
+  background: rgba(24, 200, 255, 0.1);
 }
 
 .export-card {

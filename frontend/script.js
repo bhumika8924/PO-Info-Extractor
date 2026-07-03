@@ -5,11 +5,62 @@
  */
 
 // 1. JavaScript Backend API Constant
-const API_BASE = "http://127.0.0.1:5000";
+const API_BASE = window.PO_EXTRACTOR_CONFIG?.API_BASE || "http://127.0.0.1:5000";
+const API_KEY = window.PO_EXTRACTOR_CONFIG?.API_KEY || "";
+
+function apiHeaders(extraHeaders = {}) {
+  return API_KEY ? { ...extraHeaders, "X-API-Key": API_KEY } : extraHeaders;
+}
+
+function escapeHTML(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  }[char]));
+}
+
+function html(strings, ...values) {
+  return strings.reduce((result, chunk, index) => (
+    result + chunk + (index < values.length ? safeHTMLValue(values[index]) : '')
+  ), '');
+}
+
+function setSafeHTML(element, markup) {
+  element.innerHTML = markup;
+}
+
+function safeFragment(markup) {
+  return { __safeHtml: String(markup || '') };
+}
+
+function safeHTMLValue(value) {
+  if (value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, '__safeHtml')) {
+    return value.__safeHtml;
+  }
+  return escapeHTML(value);
+}
+
+function clearNode(element) {
+  element.replaceChildren();
+}
+
+function displayValue(value, fallback = '--') {
+  const text = value === null || value === undefined || value === '' ? fallback : value;
+  return String(text);
+}
+
+function numberText(value, fallback = '0') {
+  const number = parseFloat(value);
+  return Number.isFinite(number) ? String(value) : fallback;
+}
 
 // Global lists to hold active session database records for exports and filtering
 let historyHeaders = [];
 let historyItems = [];
+let downloadHeaders = [];
 let currentSessionHeaders = [];
 let currentSessionItems = [];
 let selectedFiles = [];
@@ -215,7 +266,7 @@ function initDropzone() {
   }
 
   function renderFileList() {
-    fileListTbody.innerHTML = '';
+    clearNode(fileListTbody);
     
     if (selectedFiles.length > 0) {
       uploadCard.classList.remove('hidden');
@@ -230,7 +281,7 @@ function initDropzone() {
       const row = document.createElement('tr');
       const sizeKB = (file.size / 1024).toFixed(1);
       
-      row.innerHTML = `
+      setSafeHTML(row, html`
         <td>${file.name}</td>
         <td>${sizeKB} KB</td>
         <td><span class="status-badge warning" style="background: rgba(148,163,184,0.06); color: var(--text-muted); border-color: transparent;">Ready</span></td>
@@ -241,7 +292,7 @@ function initDropzone() {
             </svg>
           </button>
         </td>
-      `;
+      `);
 
       row.querySelector('.btn-icon-danger').addEventListener('click', (e) => {
         e.stopPropagation();
@@ -310,7 +361,7 @@ function executeLiveExtraction() {
   const fileListContainer = document.getElementById('file-list-container');
   const uploadCard = document.getElementById('upload-card');
 
-  consoleLogs.innerHTML = '';
+  clearNode(consoleLogs);
   progressBar.style.width = '0%';
 
   function printLog(text, type = 'info') {
@@ -323,7 +374,7 @@ function executeLiveExtraction() {
     if (type === 'warning') prefix = '[WARN]';
     if (type === 'error') prefix = '[ERROR]';
 
-    logEntry.innerHTML = `<span class="log-entry time">[${logTime}]</span> <span class="log-entry ${type}">${prefix} ${text}</span>`;
+    setSafeHTML(logEntry, html`<span class="log-entry time">[${logTime}]</span> <span class="log-entry ${type}">${prefix} ${text}</span>`);
     consoleLogs.appendChild(logEntry);
     consoleLogs.scrollTop = consoleLogs.scrollHeight;
   }
@@ -348,14 +399,14 @@ function executeLiveExtraction() {
       printLog('Sending multipart form-data payload to POST /extract...');
       progressBar.style.width = '25%';
     } else if (logTick === 4) {
-      stepTitle.textContent = 'Running Optical Character Recognition';
-      stepDesc.textContent = 'Parsing structural layouts and extracting text content.';
+      stepTitle.textContent = 'Reading PDF Text';
+      stepDesc.textContent = 'Parsing selectable PDF text and table structures.';
       printLog('Flask API processing files: extracting raw text structures...');
       progressBar.style.width = '45%';
     } else if (logTick === 6) {
       stepTitle.textContent = 'Extracting AI Schema Details';
-      stepDesc.textContent = 'Running LLM text parsing to extract header metadata and items.';
-      printLog('AI Model Parsing fields: matching PO headers, state codes, and items...');
+      stepDesc.textContent = 'Applying extraction rules to identify header metadata and items.';
+      printLog('Parsing fields: matching PO headers, state codes, and items...');
       progressBar.style.width = '70%';
     } else if (logTick === 8) {
       stepTitle.textContent = 'Validating Extracted Output';
@@ -366,17 +417,19 @@ function executeLiveExtraction() {
   }, 1000);
 
   // Step 2: Make actual API Call to Flask backend
-  // We send include_debug=true so we receive warnings and status codes for UI rendering
-  fetch(`${API_BASE}/extract?include_debug=true`, {
+  fetch(`${API_BASE}/extract`, {
     method: 'POST',
+    headers: apiHeaders(),
     body: formData
   })
   .then(response => {
     clearInterval(simulatedLogger);
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-    return response.json();
+    return response.json().then(payload => {
+      if (!response.ok && !(payload.documents || []).length) {
+        throw new Error(payload.message || `HTTP error! status: ${response.status}`);
+      }
+      return payload;
+    });
   })
   .then(data => {
     progressBar.style.width = '100%';
@@ -413,8 +466,8 @@ function executeLiveExtraction() {
   })
   .catch(error => {
     clearInterval(simulatedLogger);
-    printLog(`Failed to connect to API: ${error.message}`, 'error');
-    printLog('Please make sure that flask_api.py is running on port 5000.', 'error');
+    printLog(`Failed to reach API at ${API_BASE}: ${error.message}`, 'error');
+    printLog('Check that this backend URL is reachable and that the Flask API is accepting uploads.', 'error');
     
     setTimeout(() => {
       loadingCard.classList.add('hidden');
@@ -423,7 +476,7 @@ function executeLiveExtraction() {
       
       // Render standard user friendly alert banner
       const alertBanner = document.getElementById('connection-error-alert');
-      alertBanner.querySelector('.alert-text').textContent = 'Unable to extract data. Please make sure the Flask server is running and try again.';
+      alertBanner.querySelector('.alert-text').textContent = `Unable to extract data from ${API_BASE}. Please check the backend URL and try again.`;
       alertBanner.classList.remove('hidden');
       extractionInProgress = false;
       const startBtn = document.getElementById('start-extraction-btn');
@@ -453,10 +506,10 @@ function renderExtractionResultsUI(apiResponse) {
   const lineItemsTbody = document.getElementById('line-items-tbody');
   const accordionContainer = document.getElementById('filewise-accordion-container');
 
-  overviewTbody.innerHTML = '';
-  poDataTbody.innerHTML = '';
-  lineItemsTbody.innerHTML = '';
-  accordionContainer.innerHTML = '';
+  clearNode(overviewTbody);
+  clearNode(poDataTbody);
+  clearNode(lineItemsTbody);
+  clearNode(accordionContainer);
 
   // Filter input bind
   const lineItemsSearch = document.getElementById('line-items-search');
@@ -469,11 +522,11 @@ function renderExtractionResultsUI(apiResponse) {
     const debugInfo = doc.debug || {};
     
     // Status and Warnings
-    const rawStatus = debugInfo.extraction_status || 'Completed';
+    const rawStatus = doc.extraction_status || debugInfo.extraction_status || 'Completed';
     const statusText = rawStatus === 'Completed' ? 'Extracted' : 
                        rawStatus === 'Failed' ? 'Failed' : 'Needs Review';
     const statusClass = statusText.toLowerCase().replace(' ', '-');
-    const warnings = debugInfo.warnings || [];
+    const warnings = doc.warnings || debugInfo.warnings || [];
 
     if (rawStatus === 'Completed') {
       completedCount++;
@@ -484,20 +537,20 @@ function renderExtractionResultsUI(apiResponse) {
 
     // A. Populate Tab 1: Overview Table Row
     const overviewRow = document.createElement('tr');
-    overviewRow.innerHTML = `
+    setSafeHTML(overviewRow, html`
       <td><strong>${file_name}</strong></td>
       <td>${headerData.po_date || '—'}</td>
       <td>${headerData.buyer_name || '—'}</td>
       <td>${headerData.billing_state || '—'}</td>
       <td>${headerData.billing_gst_number || '—'}</td>
       <td><span class="status-badge ${statusClass}">${statusText}</span></td>
-    `;
+    `);
     overviewTbody.appendChild(overviewRow);
 
     // B. Populate Tab 2: PO Header Data Row
     const headerRow = document.createElement('tr');
     const addressString = headerData.billing_address || '—';
-    headerRow.innerHTML = `
+    setSafeHTML(headerRow, html`
       <td><strong>${file_name}</strong></td>
       <td><code style="font-family: var(--font-mono); color: var(--accent-cyan); font-size: 0.85rem;">${headerData.po_number || '—'}</code></td>
       <td>${headerData.po_date || '—'}</td>
@@ -506,7 +559,7 @@ function renderExtractionResultsUI(apiResponse) {
       <td>${headerData.billing_state || '—'}</td>
       <td>${headerData.billing_pincode || '—'}</td>
       <td>${headerData.billing_gst_number || '—'}</td>
-    `;
+    `);
     poDataTbody.appendChild(headerRow);
 
     // C. Populate Tab 3: Line Items (Combine all files into flat list)
@@ -520,7 +573,7 @@ function renderExtractionResultsUI(apiResponse) {
       const taxVal = item.tax_percent ? parseFloat(item.tax_percent).toFixed(2) : '0.00';
       const totalVal = item.line_total ? parseFloat(item.line_total).toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '0.00';
 
-      lineRow.innerHTML = `
+      setSafeHTML(lineRow, html`
         <td style="color: var(--text-muted); font-size: 0.82rem;">${file_name}</td>
         <td><code style="font-family: var(--font-mono); font-size: 0.85rem;">${headerData.po_number || '—'}</code></td>
         <td>${item.item_no || '—'}</td>
@@ -531,7 +584,7 @@ function renderExtractionResultsUI(apiResponse) {
         <td>Rs. ${priceVal}</td>
         <td>${taxVal}%</td>
         <td style="color: var(--accent-cyan); font-weight: 600;">Rs. ${totalVal}</td>
-      `;
+      `);
       lineItemsTbody.appendChild(lineRow);
     });
 
@@ -543,7 +596,7 @@ function renderExtractionResultsUI(apiResponse) {
     // Accordion Header
     const accordionHeader = document.createElement('div');
     accordionHeader.classList.add('expander-header');
-    accordionHeader.innerHTML = `
+    setSafeHTML(accordionHeader, html`
       <div class="expander-title-group">
         <span class="expander-title">${file_name}</span>
         <span class="status-badge ${statusClass}">${statusText}</span>
@@ -553,7 +606,7 @@ function renderExtractionResultsUI(apiResponse) {
           <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" />
         </svg>
       </div>
-    `;
+    `);
 
     // Accordion Content body
     const accordionContent = document.createElement('div');
@@ -562,7 +615,7 @@ function renderExtractionResultsUI(apiResponse) {
     // File warning box HTML
     let warningsBoxHTML = '';
     if (warnings.length > 0) {
-      warningsBoxHTML = `
+      warningsBoxHTML = html`
         <div class="result-warning-box">
           <h5 class="warning-box-title">Validation Warning</h5>
           <p class="warning-box-text">${warnings.join('; ')}</p>
@@ -578,7 +631,7 @@ function renderExtractionResultsUI(apiResponse) {
         const priceVal = item.unit_price ? parseFloat(item.unit_price).toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '0.00';
         const totalVal = item.line_total ? parseFloat(item.line_total).toLocaleString('en-IN', { minimumFractionDigits: 2 }) : '0.00';
 
-        fileItemsRows += `
+        fileItemsRows += html`
           <tr>
             <td>${item.item_no || '—'}</td>
             <td><strong>${item.item_name || ''}</strong><br><small style="color: var(--text-muted);">${item.item_description || ''}</small></td>
@@ -602,13 +655,13 @@ function renderExtractionResultsUI(apiResponse) {
     };
 
     // Construct accordion body
-    accordionContent.innerHTML = `
-      ${warningsBoxHTML}
+    setSafeHTML(accordionContent, html`
+      ${safeFragment(warningsBoxHTML)}
       <div class="split-layout-grid">
         <!-- Billing Information -->
         <div class="card glassmorphism" style="padding: 1.5rem;">
           <h5 class="container-title" style="font-size: 1.05rem; margin-bottom: 1rem; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem;">Billing Information</h5>
-          <table class="data-table" style="font-size: 0.85rem;">
+          <table class="data-table billing-info-table" style="font-size: 0.85rem;">
             <tbody>
               <tr><td style="color: var(--text-muted); font-weight: 600; width: 35%;">Buyer Name</td><td>${headerData.buyer_name || '—'}</td></tr>
               <tr><td style="color: var(--text-muted); font-weight: 600;">Billing Address</td><td>${addressString}</td></tr>
@@ -650,7 +703,7 @@ function renderExtractionResultsUI(apiResponse) {
             </tr>
           </thead>
           <tbody>
-            ${fileItemsRows}
+            ${safeFragment(fileItemsRows)}
           </tbody>
         </table>
       </div>
@@ -661,7 +714,7 @@ function renderExtractionResultsUI(apiResponse) {
         <button class="btn btn-secondary btn-sm file-dl-items" data-filename="${file_name}" ${items.length === 0 ? 'disabled' : ''} style="background: rgba(24, 200, 255, 0.08); border-color: rgba(24, 200, 255, 0.2);">Download Items CSV</button>
         <button class="btn btn-secondary btn-sm file-dl-json" data-filename="${file_name}" style="background: rgba(124, 58, 237, 0.08); border-color: rgba(124, 58, 237, 0.2);">Download JSON</button>
       </div>
-    `;
+    `);
 
     // Toggle expander event
     accordionHeader.addEventListener('click', () => {
@@ -743,8 +796,10 @@ function updateCurrentSessionRecords(documents) {
       vendor_name: header.vendor_name || '',
       vendor_gst_number: header.vendor_gst_number || '',
       total_amount: header.total_amount || '',
-      extraction_status: debug.extraction_status || 'Completed',
-      warnings: (debug.warnings || []).join('; '),
+      extraction_status: doc.extraction_status || debug.extraction_status || 'Failed',
+      warnings: Array.isArray(doc.warnings)
+        ? doc.warnings.join('; ')
+        : ((debug.warnings || []).join('; ')),
       created_at: new Date().toISOString(),
       _current: true
     });
@@ -791,9 +846,9 @@ function loadAutoUploadStatus() {
     refreshBtn.textContent = 'Checking...';
   }
 
-  pendingTbody.innerHTML = '<tr><td colspan="4" style="text-align:center; color: var(--text-muted);">Checking data/incoming_pdfs...</td></tr>';
+  setSafeHTML(pendingTbody, '<tr><td colspan="4" style="text-align:center; color: var(--text-muted);">Checking data/incoming_pdfs...</td></tr>');
 
-  fetch(`${API_BASE}/auto-upload-pending`)
+  fetch(`${API_BASE}/auto-upload-pending`, { headers: apiHeaders() })
     .then(response => {
       if (!response.ok) {
         const error = new Error(`HTTP ${response.status}`);
@@ -806,7 +861,7 @@ function loadAutoUploadStatus() {
       renderPendingAutoUploadFiles(payload.files || []);
     })
     .catch(error => {
-      pendingTbody.innerHTML = `<tr><td colspan="4" style="text-align:center; color: var(--danger-color);">Could not check incoming folder. Restart Flask and try again. ${error.message}</td></tr>`;
+      setSafeHTML(pendingTbody, html`<tr><td colspan="4" style="text-align:center; color: var(--danger-color);">Could not check incoming folder. Restart Flask and try again. ${error.message}</td></tr>`);
     })
     .finally(() => {
       if (refreshBtn) {
@@ -820,10 +875,10 @@ function renderPendingAutoUploadFiles(files) {
   const pendingTbody = document.getElementById('auto-pending-tbody');
   if (!pendingTbody) return;
 
-  pendingTbody.innerHTML = '';
+  clearNode(pendingTbody);
 
   if (files.length === 0) {
-    pendingTbody.innerHTML = '<tr><td colspan="4" style="text-align:center; color: var(--text-muted);">No new PDFs found in data/incoming_pdfs.</td></tr>';
+    setSafeHTML(pendingTbody, '<tr><td colspan="4" style="text-align:center; color: var(--text-muted);">No new PDFs found in data/incoming_pdfs.</td></tr>');
     return;
   }
 
@@ -831,14 +886,14 @@ function renderPendingAutoUploadFiles(files) {
     const row = document.createElement('tr');
     row.classList.add('auto-pending-row');
     row.dataset.filename = file.file_name;
-    row.innerHTML = `
+    setSafeHTML(row, html`
       <td><strong>${file.file_name}</strong></td>
       <td>${file.size_kb || 0} KB</td>
       <td style="color: var(--text-muted);">${file.modified_at || '--'}</td>
       <td class="text-right">
         <button class="btn btn-primary btn-sm auto-process-btn" data-filename="${file.file_name}">Process & View</button>
       </td>
-    `;
+    `);
     pendingTbody.appendChild(row);
   });
 }
@@ -852,7 +907,7 @@ function processIncomingPdf(fileName, button) {
 
   fetch(`${API_BASE}/auto-upload-process`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: apiHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ file_name: fileName })
   })
     .then(response => {
@@ -887,10 +942,10 @@ function renderAutoUploadResultsUI(documents) {
 
   if (!overviewTbody || !poDataTbody || !lineItemsTbody || !accordionContainer) return;
 
-  overviewTbody.innerHTML = '';
-  poDataTbody.innerHTML = '';
-  lineItemsTbody.innerHTML = '';
-  accordionContainer.innerHTML = '';
+  clearNode(overviewTbody);
+  clearNode(poDataTbody);
+  clearNode(lineItemsTbody);
+  clearNode(accordionContainer);
   if (lineItemsSearch) lineItemsSearch.value = '';
 
   let completedCount = 0;
@@ -916,18 +971,18 @@ function renderAutoUploadResultsUI(documents) {
     lineItemsCount += items.length;
 
     const overviewRow = document.createElement('tr');
-    overviewRow.innerHTML = `
+    setSafeHTML(overviewRow, html`
       <td><strong>${fileName}</strong></td>
       <td>${headerData.po_date || '--'}</td>
       <td>${headerData.buyer_name || '--'}</td>
       <td>${headerData.billing_state || '--'}</td>
       <td>${headerData.billing_gst_number || '--'}</td>
       <td><span class="status-badge ${statusClass}">${statusText}</span></td>
-    `;
+    `);
     overviewTbody.appendChild(overviewRow);
 
     const headerRow = document.createElement('tr');
-    headerRow.innerHTML = `
+    setSafeHTML(headerRow, html`
       <td><strong>${fileName}</strong></td>
       <td><code style="font-family: var(--font-mono); color: var(--accent-cyan); font-size: 0.85rem;">${headerData.po_number || '--'}</code></td>
       <td>${headerData.po_date || '--'}</td>
@@ -936,7 +991,7 @@ function renderAutoUploadResultsUI(documents) {
       <td>${headerData.billing_state || '--'}</td>
       <td>${headerData.billing_pincode || '--'}</td>
       <td>${headerData.billing_gst_number || '--'}</td>
-    `;
+    `);
     poDataTbody.appendChild(headerRow);
 
     items.forEach(item => {
@@ -949,7 +1004,7 @@ function renderAutoUploadResultsUI(documents) {
       const taxVal = item.tax_percent || '0';
       const totalVal = item.line_total || '0';
 
-      lineRow.innerHTML = `
+      setSafeHTML(lineRow, html`
         <td style="color: var(--text-muted); font-size: 0.82rem;">${fileName}</td>
         <td><code style="font-family: var(--font-mono); font-size: 0.85rem;">${item.po_number || headerData.po_number || '--'}</code></td>
         <td>${item.item_no || '--'}</td>
@@ -960,7 +1015,7 @@ function renderAutoUploadResultsUI(documents) {
         <td>Rs. ${priceVal}</td>
         <td>${taxVal}%</td>
         <td style="color: var(--accent-cyan); font-weight: 600;">Rs. ${totalVal}</td>
-      `;
+      `);
       lineItemsTbody.appendChild(lineRow);
     });
 
@@ -1000,7 +1055,7 @@ function renderAutoFilewisePanel(container, panelData) {
 
   const accordionHeader = document.createElement('div');
   accordionHeader.classList.add('expander-header');
-  accordionHeader.innerHTML = `
+  setSafeHTML(accordionHeader, html`
     <div class="expander-title-group">
       <span class="expander-title">${panelData.fileName}</span>
       <span class="status-badge ${panelData.statusClass}">${panelData.statusText}</span>
@@ -1010,11 +1065,11 @@ function renderAutoFilewisePanel(container, panelData) {
         <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" />
       </svg>
     </div>
-  `;
+  `);
 
   let warningsBoxHTML = '';
   if (panelData.warnings.length > 0) {
-    warningsBoxHTML = `
+    warningsBoxHTML = html`
       <div class="result-warning-box">
         <h5 class="warning-box-title">Validation Warning</h5>
         <p class="warning-box-text">${panelData.warnings.join('; ')}</p>
@@ -1023,7 +1078,7 @@ function renderAutoFilewisePanel(container, panelData) {
   }
 
   const rows = panelData.items.length > 0
-    ? panelData.items.map(item => `
+    ? panelData.items.map(item => html`
         <tr>
           <td>${item.item_no || '--'}</td>
           <td><strong>${item.item_name || ''}</strong><br><small style="color: var(--text-muted);">${item.item_description || ''}</small></td>
@@ -1038,12 +1093,12 @@ function renderAutoFilewisePanel(container, panelData) {
 
   const accordionContent = document.createElement('div');
   accordionContent.classList.add('expander-content');
-  accordionContent.innerHTML = `
-    ${warningsBoxHTML}
+  setSafeHTML(accordionContent, html`
+    ${safeFragment(warningsBoxHTML)}
     <div class="split-layout-grid">
       <div class="card glassmorphism" style="padding: 1.5rem;">
         <h5 class="container-title" style="font-size: 1.05rem; margin-bottom: 1rem; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem;">Billing Information</h5>
-        <table class="data-table" style="font-size: 0.85rem;">
+        <table class="data-table billing-info-table" style="font-size: 0.85rem;">
           <tbody>
             <tr><td style="color: var(--text-muted); font-weight: 600; width: 35%;">Buyer Name</td><td>${panelData.headerData.buyer_name || '--'}</td></tr>
             <tr><td style="color: var(--text-muted); font-weight: 600;">Billing Address</td><td>${panelData.addressString}</td></tr>
@@ -1080,10 +1135,10 @@ function renderAutoFilewisePanel(container, panelData) {
             <th>Line Total</th>
           </tr>
         </thead>
-        <tbody>${rows}</tbody>
+        <tbody>${safeFragment(rows)}</tbody>
       </table>
     </div>
-  `;
+  `);
 
   accordionHeader.addEventListener('click', () => {
     const isActive = accordionItem.classList.contains('active');
@@ -1147,20 +1202,24 @@ function loadDatabaseHistory() {
   if (!tbody) return;
 
   // Clear UI and fetch
-  tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color: var(--text-muted);">Syncing with MySQL database...</td></tr>';
+  setSafeHTML(tbody, '<tr><td colspan="7" style="text-align:center; color: var(--text-muted);">Syncing with MySQL database...</td></tr>');
   
-  // Call API /headers and /items endpoints in parallel
+  // History includes every upload; items remain limited to completed POs.
   Promise.all([
-    fetch(`${API_BASE}/headers?limit=100`).then(r => {
+    fetch(`${API_BASE}/history?limit=100`, { headers: apiHeaders() }).then(r => {
       if (!r.ok) throw new Error();
       return r.json();
     }),
-    fetch(`${API_BASE}/items?limit=100`).then(r => {
+    fetch(`${API_BASE}/items?limit=100`, { headers: apiHeaders() }).then(r => {
+      if (!r.ok) throw new Error();
+      return r.json();
+    }),
+    fetch(`${API_BASE}/headers?limit=100`, { headers: apiHeaders() }).then(r => {
       if (!r.ok) throw new Error();
       return r.json();
     })
   ])
-  .then(([headersPayload, itemsPayload]) => {
+  .then(([headersPayload, itemsPayload, downloadPayload]) => {
     // Hide error banner if connection succeeds
     alertBanner.classList.add('hidden');
     
@@ -1178,6 +1237,10 @@ function loadDatabaseHistory() {
       historyItems = mergeCurrentItems([]);
     }
 
+    downloadHeaders = downloadPayload.success
+      ? mergeCurrentRecords(downloadPayload.data || [])
+      : mergeCurrentRecords([]);
+
     // Render results
     renderHistoryTableUI();
     renderDownloadTableUI();
@@ -1186,6 +1249,7 @@ function loadDatabaseHistory() {
     console.error('Failed to sync history from API:', error);
     historyHeaders = mergeCurrentRecords([]);
     historyItems = mergeCurrentItems([]);
+    downloadHeaders = mergeCurrentRecords([]);
 
     renderHistoryTableUI();
     renderDownloadTableUI();
@@ -1213,7 +1277,7 @@ function renderHistoryTableUI() {
 
   if (!tbody || !emptyState || !tableEl || !searchInput || !statusFilter) return;
 
-  tbody.innerHTML = '';
+  clearNode(tbody);
 
   const searchQuery = searchInput.value.toLowerCase().trim();
   const selectedStatus = statusFilter.value;
@@ -1274,7 +1338,7 @@ function renderHistoryTableUI() {
         formattedTime = formattedTime.replace('T', ' ').slice(0, 19);
       }
 
-      row.innerHTML = `
+      setSafeHTML(row, html`
         <td><strong>${record.file_name || '—'}</strong></td>
         <td><code style="font-family: var(--font-mono); color: var(--accent-cyan); font-size: 0.85rem;">${record.po_number || '—'}</code></td>
         <td>${record.po_date || '—'}</td>
@@ -1282,7 +1346,7 @@ function renderHistoryTableUI() {
         <td>${amountText}</td>
         <td><span class="status-badge ${statusClass}">${statusText}</span></td>
         <td style="color: var(--text-muted); font-size: 0.82rem;">${formattedTime}</td>
-      `;
+      `);
 
       tbody.appendChild(row);
     });
@@ -1367,11 +1431,20 @@ function initDataExports() {
   if (!tbody) return;
 
   tbody.addEventListener('click', (event) => {
+    const pdfAction = event.target.closest('.po-view-link, .download-pdf-btn');
+    if (pdfAction) {
+      const index = Number(pdfAction.dataset.index);
+      const record = getDownloadablePOHeaders()[index];
+      if (!record) return;
+      openStoredPDF(record.file_name, pdfAction.classList.contains('download-pdf-btn'));
+      return;
+    }
+
     const button = event.target.closest('.download-json-btn');
     if (!button) return;
 
     const index = Number(button.dataset.index);
-    const record = historyHeaders[index];
+    const record = getDownloadablePOHeaders()[index];
     if (!record) return;
 
     const jsonContent = JSON.stringify(buildRecordJSON(record, index), null, 2);
@@ -1382,15 +1455,50 @@ function initDataExports() {
   renderDownloadTableUI();
 }
 
+async function openStoredPDF(fileName, shouldDownload) {
+  const viewerWindow = shouldDownload ? null : window.open('', '_blank');
+  try {
+    const endpoint = `${API_BASE}/uploaded-pdfs/${encodeURIComponent(fileName)}${shouldDownload ? '?download=1' : ''}`;
+    const response = await fetch(endpoint, { headers: apiHeaders() });
+    if (!response.ok) throw new Error(`PDF request failed with status ${response.status}`);
+
+    const blobUrl = URL.createObjectURL(await response.blob());
+    if (shouldDownload) {
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } else if (viewerWindow) {
+      viewerWindow.location.href = blobUrl;
+    }
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+  } catch (error) {
+    if (viewerWindow) viewerWindow.close();
+    console.error('Unable to open stored PDF:', error);
+    window.alert('The stored PDF could not be opened.');
+  }
+}
+
+function getDownloadablePOHeaders() {
+  return downloadHeaders.filter(record => {
+    const status = String(record.extraction_status || '').trim().toLowerCase();
+    const hasPONumber = String(record.po_number || '').trim() !== '';
+    return hasPONumber && (status === 'completed' || status === 'extracted');
+  });
+}
+
 function renderDownloadTableUI() {
   const tbody = document.getElementById('download-tbody');
   const table = document.getElementById('download-table');
   const emptyState = document.getElementById('download-empty-state');
   if (!tbody || !table || !emptyState) return;
 
-  tbody.innerHTML = '';
+  clearNode(tbody);
+  const downloadableHeaders = getDownloadablePOHeaders();
 
-  if (historyHeaders.length === 0) {
+  if (downloadableHeaders.length === 0) {
     table.classList.add('hidden');
     emptyState.classList.remove('hidden');
     return;
@@ -1399,16 +1507,38 @@ function renderDownloadTableUI() {
   table.classList.remove('hidden');
   emptyState.classList.add('hidden');
 
-  historyHeaders.forEach((record, index) => {
+  downloadableHeaders.forEach((record, index) => {
     const row = document.createElement('tr');
-    row.innerHTML = `
+    setSafeHTML(row, html`
       <td><strong>${record.file_name || '—'}</strong></td>
       <td><code style="font-family: var(--font-mono); color: var(--accent-cyan); font-size: 0.85rem;">${record.po_number || '—'}</code></td>
       <td>${record.buyer_name || '—'}</td>
       <td class="text-right">
         <button class="btn btn-primary btn-sm download-json-btn" data-index="${index}">Download JSON</button>
       </td>
-    `;
+    `);
+    const nameCell = row.querySelector('td');
+    clearNode(nameCell);
+    const fileActions = document.createElement('div');
+    fileActions.className = 'po-file-actions';
+
+    const viewButton = document.createElement('button');
+    viewButton.type = 'button';
+    viewButton.className = 'po-view-link';
+    viewButton.dataset.index = String(index);
+    viewButton.title = 'View PDF';
+    viewButton.textContent = record.file_name || 'PO PDF';
+
+    const downloadButton = document.createElement('button');
+    downloadButton.type = 'button';
+    downloadButton.className = 'download-pdf-btn';
+    downloadButton.dataset.index = String(index);
+    downloadButton.title = 'Download PDF';
+    downloadButton.setAttribute('aria-label', `Download ${record.file_name || 'PO'} PDF`);
+    downloadButton.textContent = '\u2193';
+
+    fileActions.append(viewButton, downloadButton);
+    nameCell.appendChild(fileActions);
     tbody.appendChild(row);
   });
 }

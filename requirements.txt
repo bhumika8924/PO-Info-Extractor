@@ -1,10 +1,13 @@
-flask==3.0.3
-flask-cors==4.0.1
-requests==2.32.3
-pdfplumber==0.11.0
-chromadb==0.5.3
-sentence-transformers==3.0.1
-pandas==2.2.2
-torch>=2.2.0
-mysql-connector-python==9.0.0
-watchdog==4.0.2
+flask==3.0.3 # backend framework
+flask-cors==4.0.1 # for handling Cross-Origin Resource Sharing (CORS)
+requests==2.32.3 # for making HTTP requests
+pdfplumber==0.11.0 # for extracting text and images from PDFs
+chromadb==0.5.3 # for managing vector embeddings
+sentence-transformers==3.0.1 # for generating sentence embeddings
+pandas==2.2.2 # for data/ table handling
+torch>=2.2.0 # ml framework for sentence-transformers
+mysql-connector-python==9.0.0 # for connecting to MySQL database
+watchdog==4.0.2 # for monitoring file system changes
+PyPDF2==3.0.1 # for PDF validation, page counts, and corruption checks
+waitress==3.0.2 # production WSGI server for Windows
+gunicorn==22.0.0 # production WSGI server for Linux

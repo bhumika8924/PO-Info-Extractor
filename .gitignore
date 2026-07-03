@@ -11,10 +11,16 @@ data/outputs/
 data/incoming_pdfs/
 data/processed_pdfs/
 data/failed_pdfs/
+docs/render_tmp/
+render_tmp/
+*.tmp
+*.temp
 logs/
 frontend/js/node_modules/
 frontend/js/dist/
 
-.DS_Store
-Thumbs.db
-~$*.docx
+.DS_Store # macOS file system metadata
+Thumbs.db  # thumbnail cache files on Windows
+~$*.docx  # Temporary files created by Microsoft Word
+outputs/
+docs/.simple-test-render/

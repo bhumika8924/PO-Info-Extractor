@@ -10,6 +10,7 @@ from watchdog.observers import Observer
 
 from backend.utils.output_writer import write_clean_json_outputs, write_response_export_bundle
 from backend.extraction.po_processor import process_uploaded_pdfs
+from backend.settings import ENABLE_DEBUG_RESPONSES
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -61,9 +62,11 @@ def extraction_failed(response: dict) -> bool:
 
     for document in documents:
         debug = document.get("debug") or {}
-        if debug.get("error"):
-            return True
-        if debug.get("extraction_status") == "Failed":
+        if (
+            document.get("extraction_status") == "Failed"
+            or debug.get("error")
+            or debug.get("extraction_status") == "Failed"
+        ):
             return True
     return False
 
@@ -78,7 +81,7 @@ def process_pdf(pdf_path: Path) -> None:
         wait_for_copy_to_finish(pdf_path)
 
         log(f"Processing with existing PO extraction flow: {pdf_path.name}")
-        response = process_uploaded_pdfs([pdf_path], include_debug=True, write_outputs=False)
+        response = process_uploaded_pdfs([pdf_path], include_debug=ENABLE_DEBUG_RESPONSES, write_outputs=False)
 
         if extraction_failed(response):
             destination = unique_destination(FAILED_DIR, pdf_path)

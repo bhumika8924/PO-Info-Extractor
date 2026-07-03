@@ -53,8 +53,8 @@ def clean_document_for_output(
         "processed_at": timestamp(),
         "source_pdf": str(source_pdf) if source_pdf else debug.get("saved_pdf_path"),
         "moved_to": moved_to,
-        "extraction_status": debug.get("extraction_status"),
-        "warnings": debug.get("warnings") or [],
+        "extraction_status": document.get("extraction_status") or debug.get("extraction_status"),
+        "warnings": document.get("warnings") or debug.get("warnings") or [],
         "data": document.get("data") or {},
         "items": document.get("items") or [],
     }
@@ -130,8 +130,8 @@ def write_response_export_bundle(response: dict[str, Any], output_dir: Path) -> 
             {
                 "file_name": file_name,
                 **data,
-                "extraction_status": debug.get("extraction_status"),
-                "warnings": "; ".join(debug.get("warnings") or []),
+                "extraction_status": document.get("extraction_status") or debug.get("extraction_status"),
+                "warnings": "; ".join(document.get("warnings") or debug.get("warnings") or []),
             }
         )
         for item in document.get("items") or []:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import hashlib
 import traceback
+from io import BytesIO
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -9,6 +11,7 @@ import re
 from typing import Any
 
 import pandas as pd
+from PyPDF2 import PdfReader
 
 from backend.extraction.chunker import split_text_into_chunks
 from backend.database.database import (
@@ -26,6 +29,12 @@ from backend.extraction.extractor import (
 from backend.utils.output_writer import write_clean_json_outputs, write_json_file
 from backend.extraction.pdf_reader import extract_text_from_pdf
 from backend.extraction.vector_store import LocalVectorStore
+from backend.settings import (
+    ENABLE_DEBUG_RESPONSES,
+    MAX_PDF_PAGES,
+    MAX_UPLOAD_SIZE_BYTES,
+    PROCESSING_TIMEOUT_SECONDS,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -309,6 +318,35 @@ def read_upload(file_obj: Any, fallback_index: int) -> tuple[str, bytes]:
     return filename, data
 
 
+def validate_pdf_upload(file_name: str, file_bytes: bytes) -> int:
+    if not file_name.lower().endswith(".pdf"):
+        raise ValueError("Only PDF files are supported.")
+    if not file_bytes:
+        raise ValueError("Uploaded file is empty.")
+    if len(file_bytes) > MAX_UPLOAD_SIZE_BYTES:
+        max_mb = MAX_UPLOAD_SIZE_BYTES / (1024 * 1024)
+        raise ValueError(f"PDF exceeds the {max_mb:.0f} MB file size limit.")
+
+    try:
+        reader = PdfReader(BytesIO(file_bytes), strict=False)
+        if reader.is_encrypted:
+            try:
+                reader.decrypt("")
+            except Exception as exc:
+                raise ValueError("Encrypted PDFs are not supported.") from exc
+        page_count = len(reader.pages)
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError(f"Invalid or corrupted PDF: {exc}") from exc
+
+    if page_count <= 0:
+        raise ValueError("PDF does not contain any readable pages.")
+    if page_count > MAX_PDF_PAGES:
+        raise ValueError(f"PDF has {page_count} pages, exceeding the {MAX_PDF_PAGES}-page limit.")
+    return page_count
+
+
 def save_json_result(file_name: str, payload: dict[str, Any]) -> Path:
     output_path = OUTPUT_DIR / f"{Path(safe_filename(file_name)).stem}.json"
     return write_json_file(output_path, make_json_safe(payload))
@@ -354,6 +392,26 @@ def failed_header_row(file_name: str, message: str) -> dict[str, str]:
     }
 
 
+def looks_like_purchase_order(
+    pdf_text: str,
+    header_row: dict[str, Any],
+    item_rows: list[dict[str, Any]],
+) -> bool:
+    """Reject unrelated PDFs before they can be stored as PO records."""
+    po_number = none_if_blank(header_row.get("po_number"))
+    has_po_title = bool(re.search(r"\b(?:purchase\s+order|service\s+purchase\s+order)\b", pdf_text, re.IGNORECASE))
+    has_po_label = bool(re.search(r"\b(?:purchase\s+order\s+no|po\s*(?:number|no\.?|:))", pdf_text, re.IGNORECASE))
+    supporting_fields = sum(
+        bool(none_if_blank(header_row.get(field)))
+        for field in ("po_date", "buyer_name", "vendor_name", "total_amount")
+    )
+    return bool(
+        po_number
+        and (has_po_title or has_po_label)
+        and (bool(item_rows) or supporting_fields >= 2)
+    )
+
+
 def process_single_pdf(file_obj: Any, run_id: str, file_index: int) -> dict[str, Any]:
     step = "starting"
     logs: list[str] = []
@@ -368,10 +426,8 @@ def process_single_pdf(file_obj: Any, run_id: str, file_index: int) -> dict[str,
     try:
         step = "validate PDF"
         log_step(step)
-        if not file_name.lower().endswith(".pdf"):
-            raise ValueError("Only PDF files are supported.")
-        if not file_bytes:
-            raise ValueError("Uploaded file is empty.")
+        page_count = validate_pdf_upload(file_name, file_bytes)
+        payload["page_count"] = page_count
 
         step = "save upload"
         log_step(step)
@@ -416,6 +472,11 @@ def process_single_pdf(file_obj: Any, run_id: str, file_index: int) -> dict[str,
             file_name=file_name,
             po_number=header_row.get("po_number"),
         )
+
+        step = "validate purchase order"
+        log_step(step)
+        if not looks_like_purchase_order(pdf_text, header_row, item_rows):
+            raise ValueError("Document does not appear to be a purchase order.")
 
         warnings = [warning for warning in header_row.get("warnings", "").split("; ") if warning]
         if not item_rows:
@@ -463,9 +524,10 @@ def process_single_pdf(file_obj: Any, run_id: str, file_index: int) -> dict[str,
                 "warnings": [message],
                 "error": message,
                 "failed_step": step,
-                "traceback": traceback.format_exc(),
             }
         )
+        if ENABLE_DEBUG_RESPONSES:
+            payload["traceback"] = traceback.format_exc()
         json_output_path = save_json_result(file_name, payload)
         return {
             "header_row": failed_header_row(file_name, message),
@@ -474,6 +536,41 @@ def process_single_pdf(file_obj: Any, run_id: str, file_index: int) -> dict[str,
             "json_output_path": str(json_output_path),
             "error": message,
         }
+
+
+def timeout_result(file_obj: Any, file_index: int) -> dict[str, Any]:
+    file_name, _ = read_upload(file_obj, file_index)
+    message = f"{file_name} failed during processing timeout: TimeoutError: exceeded {PROCESSING_TIMEOUT_SECONDS} seconds"
+    payload = base_payload(file_name, UPLOAD_DIR / safe_filename(file_name), [])
+    payload.update(
+        {
+            "extraction_status": "Failed",
+            "warnings": [message],
+            "error": message,
+            "failed_step": "processing timeout",
+        }
+    )
+    json_output_path = save_json_result(file_name, payload)
+    return {
+        "header_row": failed_header_row(file_name, message),
+        "item_rows": [],
+        "payload": payload,
+        "json_output_path": str(json_output_path),
+        "error": message,
+    }
+
+
+def process_single_pdf_with_timeout(file_obj: Any, run_id: str, file_index: int) -> dict[str, Any]:
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(process_single_pdf, file_obj, run_id, file_index)
+    try:
+        result = future.result(timeout=PROCESSING_TIMEOUT_SECONDS)
+        executor.shutdown(wait=True)
+        return result
+    except FutureTimeoutError:
+        future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        return timeout_result(file_obj, file_index)
 
 
 def database_status() -> dict[str, Any]:
@@ -488,6 +585,7 @@ def database_summary() -> dict[str, Any]:
         "connected": bool(counts.get("connected")),
         "total_headers_in_database": counts.get("headers_count", 0),
         "total_items_in_database": counts.get("items_count", 0),
+        "total_logs_in_database": counts.get("logs_count", 0),
         "message": counts.get("message", ""),
     }
 
@@ -499,6 +597,8 @@ def build_document_response(processed_item: dict[str, Any], include_debug: bool 
         "file_name": none_if_blank(header_row.get("file_name") or payload.get("file_name")),
         "data": document_data_from_header(header_row),
         "items": clean_items(processed_item["item_rows"]),
+        "extraction_status": header_row.get("extraction_status") or payload.get("extraction_status"),
+        "warnings": ensure_warning_list(header_row.get("warnings")),
     }
     if include_debug:
         document["debug"] = {
@@ -515,15 +615,44 @@ def build_document_response(processed_item: dict[str, Any], include_debug: bool 
     return document
 
 
+def build_processing_log_rows(processed_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert in-memory extraction logs into rows for po_processing_logs."""
+    rows = []
+    for item in processed_items:
+        header_row = item.get("header_row") or {}
+        payload = item.get("payload") or {}
+        for message in payload.get("logs") or []:
+            rows.append(
+                {
+                    "file_name": payload.get("file_name") or header_row.get("file_name"),
+                    "po_number": header_row.get("po_number") or payload.get("po_number"),
+                    "extraction_status": payload.get("extraction_status") or header_row.get("extraction_status"),
+                    "failed_step": payload.get("failed_step"),
+                    "message": message,
+                }
+            )
+    return rows
+
+
 def process_uploaded_pdfs(
     files: list[Any],
     include_debug: bool = False,
     write_outputs: bool = True,
 ) -> dict[str, Any]:
     run_id = datetime.now().strftime("%H%M%S%f")
-    processed = [process_single_pdf(file_obj, run_id, index) for index, file_obj in enumerate(files, start=1)]
-    headers = [item["header_row"] for item in processed]
-    items = [row for item in processed for row in item["item_rows"]]
+    processed = [
+        process_single_pdf_with_timeout(file_obj, run_id, index)
+        for index, file_obj in enumerate(files, start=1)
+    ]
+    completed_items = [
+        item
+        for item in processed
+        if not item.get("error")
+        and str(item["header_row"].get("extraction_status", "")).strip().lower() == "completed"
+    ]
+    headers = [item["header_row"] for item in completed_items]
+    items = [row for item in completed_items for row in item["item_rows"]]
+    logs = build_processing_log_rows(processed)
     warnings = [
         warning
         for item in processed
@@ -531,13 +660,30 @@ def process_uploaded_pdfs(
         if warning
     ]
 
-    database_save_status = save_extraction_to_mysql(headers, items)
+    database_save_status = save_extraction_to_mysql(headers, items, logs)
 
     documents = [build_document_response(item, include_debug=include_debug) for item in processed]
+    failed_count = sum(1 for item in processed if item.get("error"))
+    successful_count = len(processed) - failed_count
+    if failed_count == 0:
+        status_code = 200
+        success = True
+        message = f"Processed {len(processed)} document(s) successfully."
+    elif successful_count == 0:
+        status_code = 422
+        success = False
+        message = f"Failed to process {failed_count} document(s)."
+    else:
+        status_code = 207
+        success = False
+        message = f"Processed {successful_count} document(s); {failed_count} document(s) failed."
     response = {
-        "message": f"Processed {len(processed)} document(s) successfully.",
-        "status_code": 200,
-        "success": True,
+        "message": message,
+        "status_code": status_code,
+        "success": success,
+        "successful_files": successful_count,
+        "failed_files": failed_count,
+        "total_files": len(processed),
         "documents": documents,
     }
     if include_debug:

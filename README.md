@@ -1,46 +1,79 @@
 # PO Info Extractor
 
-PO Info Extractor extracts structured purchase order information from PDF files. It supports manual upload from the web page, folder-based Auto Upload and a Flask API used by the HTML/CSS/JS frontend.
+PO Info Extractor extracts structured purchase order information from PDF files.
+It supports manual upload from the web page, folder-based Auto Upload and a Flask API used by the HTML/CSS/JS frontend.
+
+The project has two parts: a browser frontend (HTML/CSS/JavaScript) and a Python Flask backend. The frontend sends PDFs to the backend through HTTP API requests; the backend extracts PO data, saves database records when MySQL is available, and returns JSON.
+
+## How the Project Works
+
+```text
+User selects a PDF
+  -> JavaScript frontend (normally http://127.0.0.1:8080)
+  -> POST http://127.0.0.1:5000/extract
+  -> Python Flask reads and processes the PDF
+  -> MySQL and data/outputs receive the result
+  -> JSON returns to JavaScript
+  -> The browser displays the extracted PO
+```
+
+The frontend cannot call Python functions directly. JavaScript `fetch()` sends HTTP requests to Flask routes such as `@app.post("/extract")`.
+
+## Requirements
+
+- Python 3.11 or 3.12
+- Node.js and npm
+- MySQL Server (recommended for database history)
+
+The API can start while MySQL is offline, but database features will not work. The `/health` endpoint reports the database status.
 
 
 ## Project Structure
 
 ```text
 PO Info Extractor/
-  flask_api.py                   Flask launcher. Keeps `python flask_api.py` working.
+  flask_api.py                   Local Flask launcher.
+  wsgi.py                        Production WSGI entry point.
+  deploy_waitress.py             Production API launcher for Windows.
   requirements.txt               Python dependencies.
   README.md                      Project overview and setup guide.
   .env                           Local database credentials. Ignored by Git.
 
   backend/
-    flask_api.py                 Flask API routes.
     watcher.py                   Folder automation worker.
-    db_schema.sql                MySQL schema for PO header and item tables.
-    utils/
+    settings.py                  API security and runtime settings.
+    api/
+      flask_api.py               Flask application and API routes.
+    database/
+      config.py                  MySQL configuration.
+      database.py                Database creation, saves, and history reads.
+      db_schema.sql              MySQL table definitions.
+    extraction/
       pdf_reader.py              Reads PDF text with pdfplumber.
       chunker.py                 Splits PDF text into chunks.
       vector_store.py            Local semantic search helper using ChromaDB.
       extractor.py               Rule-based PO field and line-item extraction.
       po_processor.py            Shared extraction pipeline used by the API and watcher.
-      database.py                MySQL connection, table creation, saves, and history reads.
+    utils/
       output_writer.py           JSON export and processed history writer.
 
   frontend/
-    package.json                 Static frontend dev-server script.
-    index.html                   Frontend HTML entrypoint.
-    script.js                    Dashboard logic and Flask API calls.
-    styles.css                   Dashboard styling.
+      package.json               Static frontend dev-server script.
+      index.html                 Frontend HTML entrypoint.
+      script.js                  Dashboard logic and Flask API calls.
+      styles.css                 Dashboard styling.
+      server.js                  Local frontend server.
+      backendApiConfig.js        Backend address configuration.
 
   docs/
     Doc.docx                     Project document/reference file.
 
-  incoming_pdfs/                 Runtime folder for auto-upload input PDFs.
-  processed_pdfs/                Runtime folder for successfully processed PDFs.
-  failed_pdfs/                   Runtime folder for PDFs that need review.
-  uploads/                       Runtime folder for uploaded PDF copies.
-  outputs/                       Runtime folder for CSV/JSON outputs and history.
-  chroma_db/                     Runtime folder for local vector database data.
-  chroma_tmp/                    Runtime folder for temporary vector/cache data.
+  data/                          Generated runtime data.
+    incoming_pdfs/               Auto-upload input PDFs.
+    processed_pdfs/              Successfully processed PDFs.
+    failed_pdfs/                 PDFs that need review.
+    uploads/                     Manual-upload PDF copies.
+    outputs/                     CSV/JSON outputs and history.
 ```
 
 Runtime folders are generated locally and should not be committed to Git.
@@ -53,7 +86,7 @@ Python is the backend language. It runs the Flask API, PDF extraction logic, dat
 
 ### Flask
 
-Flask powers the HTTP API in `backend/flask_api.py`.
+Flask powers the HTTP API in `backend/api/flask_api.py`.
 
 It is responsible for:
 - `/health`
@@ -61,6 +94,10 @@ It is responsible for:
 - `/extract`
 - `/headers`
 - `/items`
+- `/logs`
+- `/auto-upload-pending`
+- `/auto-upload-process`
+- `/auto-upload-results`
 
 Run it with:
 
@@ -68,11 +105,11 @@ Run it with:
 python flask_api.py
 ```
 
-`flask_api.py` in the root is only a launcher. The real API code is in `backend/flask_api.py`.
+`flask_api.py` in the root is only a launcher. The real API code is in `backend/api/flask_api.py`.
 
 ### Static HTML Frontend
 
-Plain HTML, CSS, and JavaScript power the web frontend in `frontend/`.
+Plain HTML, CSS, and JavaScript power the web frontend in `frontend/js/`.
 
 It is responsible for:
 - PDF upload from the browser
@@ -135,12 +172,13 @@ MySQL stores extracted PO records.
 It is responsible for:
 - `po_headers` table for one row per processed PO
 - `po_items` table for line items
+- `po_processing_logs` table for extraction step logs
 - Upload history data when database records are available
 
 The schema is in:
 
 ```text
-backend/db_schema.sql
+backend/database/db_schema.sql
 ```
 
 ### Auto Upload
@@ -155,10 +193,10 @@ Flask API upload:
 ```text
 frontend/
   -> calls Flask API at http://127.0.0.1:5000
-  -> backend/flask_api.py
-  -> backend/utils/po_processor.py
-  -> backend/utils/database.py
-  -> outputs/
+  -> backend/api/flask_api.py
+  -> backend/extraction/po_processor.py
+  -> backend/database/database.py
+  -> data/outputs/
 ```
 
 Auto folder upload:
@@ -167,7 +205,7 @@ Auto folder upload:
 frontend refresh/process button
   -> Flask API auto-upload endpoints
   -> data/incoming_pdfs/
-  -> backend/utils/po_processor.py
+  -> backend/extraction/po_processor.py
   -> data/processed_pdfs/ or data/failed_pdfs/
   -> data/outputs/
 ```
@@ -194,6 +232,8 @@ DB_PASSWORD=your_mysql_password
 DB_NAME=po_extractor
 ```
 
+Create `.env` in the project root, replace the sample password, and do not commit the file. Flask attempts to create the configured database and tables when it starts.
+
 ## Run Commands
 
 Flask API:
@@ -205,17 +245,117 @@ python flask_api.py
 Static frontend:
 
 ```powershell
-cd frontend
+cd frontend/js
 npm install
 npm run dev
 ```
 
 This starts the static frontend and starts/checks the Flask API used for PDF extraction.
 
+The easiest complete start sequence from the project root is:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+cd frontend/js
+npm run dev
+```
+
+The frontend checks `/health`, starts `python flask_api.py` automatically when necessary, and prints its URL. It normally uses `http://127.0.0.1:8080/`. If port 8080 is busy, it tries the next port.
+
+## Check That the API Works
+
+Open this URL in a browser or send a GET request from Postman:
+
+```text
+http://127.0.0.1:5000/health
+```
+
+A working API returns JSON containing `"status": "ok"`. Its `database` field shows whether MySQL is connected.
+
+## API Endpoints
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `GET` | `/health` | Check API and database status |
+| `GET` | `/database-summary` | Get a database summary |
+| `POST` | `/extract` | Upload and extract PDFs |
+| `GET` | `/headers?limit=25` | Get recent PO headers |
+| `GET` | `/items?limit=25` | Get recent PO items |
+| `GET` | `/logs?limit=25` | Get processing logs |
+| `GET` | `/auto-upload-pending` | List PDFs in `data/incoming_pdfs` |
+| `POST` | `/auto-upload-process` | Process one pending PDF |
+| `GET` | `/auto-upload-results?limit=25` | Get Auto Upload results |
+
+Every local endpoint starts with `http://127.0.0.1:5000`.
+
+## Test PDF Extraction in Postman
+
+1. Start the Flask API.
+2. Create a `POST` request to `http://127.0.0.1:5000/extract`.
+3. Choose **Body**, then **form-data**.
+4. Enter `files` in the **Key** column.
+5. Change its type from **Text** to **File**.
+6. Select a PDF and click **Send**.
+
+The key must be exactly `files` because Flask uses `request.files.getlist("files")`. Do not manually set `Content-Type`; Postman creates it.
+
+## Frontend API Configuration
+
+`frontend/js/server.js` supplies the backend address. `script.js` reads it and falls back to the local Flask server:
+
+```js
+const API_BASE = window.PO_EXTRACTOR_CONFIG?.API_BASE || "http://127.0.0.1:5000";
+```
+
+To use another backend:
+
+```powershell
+$env:BACKEND_URL="http://server-address:5000"
+npm run dev
+```
+
+## Auto Upload and Folder Watcher
+
+Place PDFs in `data/incoming_pdfs/`. Successful files move to `data/processed_pdfs/`; unsuccessful files move to `data/failed_pdfs/`.
+
+To monitor that folder continuously without the browser:
+
+```powershell
+python -m backend.watcher
+```
+
+## Development and Production
+
+`python flask_api.py` uses Flask's local development server. For production, use:
+
+- Windows: `python deploy_waitress.py`
+- Linux: `gunicorn "wsgi:app" --bind 127.0.0.1:5000 --workers 2 --threads 4 --timeout 180`
+
+`wsgi.py` does not create another backend. It exposes the existing Flask app to a production server. See `docs/DEPLOYMENT.md`.
+
+## Common Problems
+
+### No PDF files were uploaded
+
+Use form-data key `files` and set its type to **File**.
+
+### Frontend cannot connect
+
+- Check that `http://127.0.0.1:5000/health` opens.
+- Check the Python terminal for errors.
+- Confirm that `API_BASE` uses the Flask host and port.
+
+### MySQL connection fails
+
+- Confirm MySQL Server is running.
+- Check `.env`.
+- Read the `database` field returned by `/health`.
+
 ## Notes
 
 - The frontend needs the Flask API running.
 - The folder watcher uses the same extraction pipeline as browser upload.
-- CSV/JSON exports are written to `outputs/`.
-- Uploaded PDF copies are written to `uploads/`.
+- CSV/JSON exports are written to `data/outputs/`.
+- Uploaded PDF copies are written to `data/uploads/`.
 - The first extraction can take longer because the local sentence-transformer model may need to load.
+- Image-only scanned PDFs require OCR before reliable text extraction.
